@@ -3,14 +3,16 @@ import pandas as pd
 import numpy as np
 import pypdf
 import re
+import gspread
 from io import BytesIO
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
 from streamlit_gsheets import GSheetsConnection
 
-# Importações para a Geração do Relatório PDF
+# Importações do ReportLab para Relatório Executivo Avançado
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -29,9 +31,34 @@ URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mn
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ==============================================================================
-# CARREGAMENTO DA BASE
+# FUNÇÃO DE GRAVAÇÃO DIRETA NO GOOGLE SHEETS VIA SERVICE ACCOUNT
 # ==============================================================================
-@st.cache_data(ttl=30)
+def salvar_no_google_sheets_gspread(df, aba_nome):
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            gc = gspread.service_account_from_dict(creds_dict)
+            sh = gc.open_by_url(URL_PLANILHA)
+            
+            try:
+                worksheet = sh.worksheet(aba_nome)
+            except Exception:
+                worksheet = sh.add_worksheet(title=aba_nome, rows=1000, cols=40)
+            
+            df_str = df.astype(str)
+            worksheet.clear()
+            worksheet.update([df_str.columns.values.tolist()] + df_str.values.tolist())
+            return True
+        else:
+            return False
+    except Exception as e:
+        st.warning(f"Aviso de escrita remota: {e}")
+        return False
+
+# ==============================================================================
+# CARREGAMENTO DA BASE DE DADOS
+# ==============================================================================
+@st.cache_data(ttl=15)
 def carregar_dados_base():
     try:
         df = conn.read(spreadsheet=URL_PLANILHA, worksheet="Banco de Dados - Análises de Óleo")
@@ -44,111 +71,133 @@ def carregar_dados_base():
     except Exception:
         return pd.DataFrame()
 
+@st.cache_data(ttl=15)
+def carregar_plano_5w2h():
+    try:
+        df = conn.read(spreadsheet=URL_PLANILHA, worksheet="Plano_5W2H")
+        return df.dropna(how="all")
+    except Exception:
+        return pd.DataFrame(columns=[
+            "Data Registro", "Nº Controle Lab", "Frota", "Modelo", "Compartimento", 
+            "Status Amostra", "O Que (What)", "Por Que (Why)", "Onde (Where)", 
+            "Quando / Prazo (When)", "Quem / Responsável (Who)", "E-mail Responsável", 
+            "Como (How)", "Quanto Custa (How Much)", "Status Execução", "Histórico de Alterações"
+        ])
+
 if "df_base" not in st.session_state:
     st.session_state.df_base = carregar_dados_base()
 
 if "df_5w2h" not in st.session_state:
-    st.session_state.df_5w2h = pd.DataFrame(columns=[
-        "Data Registro", "Nº Controle Lab", "Frota", "Modelo", "Compartimento", 
-        "Status Amostra", "O Que (What)", "Por Que (Why)", "Onde (Where)", 
-        "Quando / Prazo (When)", "Quem / Responsável (Who)", "E-mail Responsável", 
-        "Como (How)", "Quanto Custa (How Much)", "Status Execução", "Histórico de Alterações"
-    ])
+    st.session_state.df_5w2h = carregar_plano_5w2h()
 
 df_base = st.session_state.df_base
 
 # ==============================================================================
-# GERADOR DE RELATÓRIO PDF EXECUTIVO
+# GERADOR DE RELATÓRIO PDF EXECUTIVO COMPLETO (TODOS OS MÓDULOS)
 # ==============================================================================
-def gerar_relatorio_pdf_gerencial(df_dados, df_planos):
+def gerar_relatorio_pdf_completo(df_dados, df_planos):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     story = []
     
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor("#1E3A8A"), spaceAfter=12)
-    subtitle_style = ParagraphStyle('SubtitleStyle', parent=styles['Heading2'], fontSize=13, textColor=colors.HexColor("#1F2937"), spaceAfter=8)
-    normal_style = styles['Normal']
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor("#0F172A"), spaceAfter=10)
+    subtitle_style = ParagraphStyle('SubtitleStyle', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor("#1E3A8A"), spaceAfter=6)
+    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=9, leading=12)
 
-    # Cabeçalho
-    story.append(Paragraph("<b>PORTAL DE ENGENHARIA DE CONFIABILIDADE & ANALISE DE OLEO S•O•S</b>", title_style))
-    story.append(Paragraph(f"Data de Emissao: {datetime.now().strftime('%d/%m/%Y %H:%M')}", normal_style))
-    story.append(Spacer(1, 15))
+    # 1. Capa e Resumo Executivo
+    story.append(Paragraph("<b>RELATÓRIO TÉCNICO DE ENGENHARIA DE CONFIABILIDADE S•O•S</b>", title_style))
+    story.append(Paragraph(f"Data da Emissão: {datetime.now().strftime('%d/%m/%Y %H:%M')} | Cliente: 3 SKAVAMINAS", body_style))
+    story.append(Spacer(1, 10))
 
-    # Resumo Geral
-    story.append(Paragraph("1. Resumo Executivo da Frota", subtitle_style))
-    total_amostras = len(df_dados)
+    total = len(df_dados)
     criticos = len(df_dados[df_dados["Status"] == "Crítico"]) if not df_dados.empty else 0
-    monitorar = len(df_dados[df_dados["Status"] == "Monitorar"]) if not df_dados.empty else 0
+    monit = len(df_dados[df_dados["Status"] == "Monitorar"]) if not df_dados.empty else 0
     normais = len(df_dados[df_dados["Status"] == "Normal"]) if not df_dados.empty else 0
 
-    kpi_data = [
-        ["Total de Amostras", "Equipamentos Criticos", "Em Monitoramento", "Status Normal"],
-        [str(total_amostras), str(criticos), str(monitorar), str(normais)]
-    ]
-    t_kpi = Table(kpi_data, colWidths=[130, 130, 130, 130])
-    t_kpi.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#3B82F6")),
+    story.append(Paragraph("<b>1. Indicadores Globais da Frota (KPIs)</b>", subtitle_style))
+    kpi_table = Table([
+        ["Total Amostras", "Críticos (Ação Imediata)", "Em Monitoramento", "Normais"],
+        [str(total), str(criticos), str(monit), str(normais)]
+    ], colWidths=[130, 140, 130, 130])
+    kpi_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E40AF")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#94A3B8"))
     ]))
-    story.append(t_kpi)
+    story.append(kpi_table)
     story.append(Spacer(1, 15))
 
-    # Tabela das ultimas amostras criticas
-    story.append(Paragraph("2. Amostras Criticas Recentes", subtitle_style))
+    # 2. Ranking de Bad Actors
+    story.append(Paragraph("<b>2. Ranking de Piores Ativos (Bad Actors)</b>", subtitle_style))
     if not df_dados.empty:
-        df_crit = df_dados[df_dados["Status"].isin(["Crítico", "Monitorar"])].head(10)
+        df_crit = df_dados[df_dados["Status"].isin(["Crítico", "Monitorar"])]
         if not df_crit.empty:
-            dados_crit = [["Data", "Frota", "Modelo", "Compartimento", "Fe", "Si", "Status"]]
-            for _, r in df_crit.iterrows():
-                dados_crit.append([
-                    str(r.get("Data da Coleta", "")), str(r.get("Frota", "")),
-                    str(r.get("Modelo", "")), str(r.get("Compartimento", "")),
-                    str(r.get("Fe", 0)), str(r.get("Si", 0)), str(r.get("Status", ""))
-                ])
-            t_crit = Table(dados_crit, colWidths=[70, 70, 80, 120, 50, 50, 80])
-            t_crit.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E293B")),
+            bad = df_crit.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Falhas").sort_values(by="Falhas", ascending=False).head(8)
+            bad_data = [["Frota", "Modelo", "Compartimento", "Ocorrências Críticas"]]
+            for _, r in bad.iterrows():
+                bad_data.append([str(r["Frota"]), str(r["Modelo"]), str(r["Compartimento"]), str(r["Falhas"])])
+            t_bad = Table(bad_data, colWidths=[100, 120, 210, 100])
+            t_bad.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#991B1B")),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER')
             ]))
-            story.append(t_crit)
-        else:
-            story.append(Paragraph("Nenhuma amostra critica registrada.", normal_style))
+            story.append(t_bad)
     story.append(Spacer(1, 15))
 
-    # Plano 5W2H
-    story.append(Paragraph("3. Plano de Acao 5W2H e Acompanhamento", subtitle_style))
+    # 3. Análise Estatística Quimica e Diagnóstico
+    story.append(Paragraph("<b>3. Avaliação Estatística de Metais e Condição (Média e Dispersão)</b>", subtitle_style))
+    if not df_dados.empty:
+        fe_med, fe_max = df_dados["Fe"].mean(), df_dados["Fe"].max()
+        si_med, si_max = df_dados["Si"].mean(), df_dados["Si"].max()
+        v100_med = df_dados["V100"].mean()
+        
+        stat_data = [
+            ["Parâmetro Químico", "Média Geral (ppm / cSt)", "Máximo Encontrado", "Status da População"],
+            ["Ferro (Fe) - Desgaste", f"{fe_med:.1f} ppm", f"{fe_max:.1f} ppm", "Crítico" if fe_max > 100 else "Normal"],
+            ["Silício (Si) - Poeira", f"{si_med:.1f} ppm", f"{si_max:.1f} ppm", "Atenção" if si_max > 30 else "Normal"],
+            ["Viscosidade 100ºC (V100)", f"{v100_med:.1f} cSt", "-", "Estável"]
+        ]
+        t_stat = Table(stat_data, colWidths=[150, 130, 120, 130])
+        t_stat.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#0F766E")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER')
+        ]))
+        story.append(t_stat)
+    story.append(Spacer(1, 15))
+
+    # 4. Plano de Ação 5W2H
+    story.append(Paragraph("<b>4. Plano de Ação 5W2H Cadastrado</b>", subtitle_style))
     if not df_planos.empty:
-        dados_p = [["Frota", "O Que (What)", "Responsavel", "Prazo", "Status"]]
-        for _, r in df_planos.head(10).iterrows():
-            dados_p.append([
-                str(r.get("Frota", "")), str(r.get("O Que (What)", ""))[:30],
+        p_data = [["Frota", "O Que Fazer (What)", "Responsável", "Prazo", "Status"]]
+        for _, r in df_planos.head(8).iterrows():
+            p_data.append([
+                str(r.get("Frota", "")), str(r.get("O Que (What)", ""))[:35],
                 str(r.get("Quem / Responsável (Who)", "")), str(r.get("Quando / Prazo (When)", "")),
                 str(r.get("Status Execução", ""))
             ])
-        t_plan = Table(dados_p, colWidths=[70, 180, 100, 80, 90])
-        t_plan.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#059669")),
+        t_p = Table(p_data, colWidths=[60, 200, 110, 70, 90])
+        t_p.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#15803D")),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER')
         ]))
-        story.append(t_plan)
+        story.append(t_p)
     else:
-        story.append(Paragraph("Nenhum plano 5W2H cadastrado.", normal_style))
+        story.append(Paragraph("Nenhum plano 5W2H cadastrado para esta seleção.", body_style))
 
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 # ==============================================================================
-# PARSER EXTRAÇÃO DE LAUDOS
+# PARSER EXTRAÇÃO DE LAUDOS SOTREQ
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -236,17 +285,16 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# MENU LATERAL
+# FILTROS LATERAIS E MENU
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
-# Botão para Download do Relatório Gerencial em PDF
-st.sidebar.subheader("📄 Emissão de Relatório")
-pdf_bytes = gerar_relatorio_pdf_gerencial(st.session_state.df_base, st.session_state.df_5w2h)
+st.sidebar.subheader("📄 Relatório Executivo PDF")
+pdf_bytes = gerar_relatorio_pdf_completo(st.session_state.df_base, st.session_state.df_5w2h)
 st.sidebar.download_button(
     label="📥 EMITIR RELATÓRIO PDF COMPLETO",
     data=pdf_bytes,
-    file_name=f"Relatorio_Preditiva_SOS_{datetime.now().strftime('%d%m%Y')}.pdf",
+    file_name=f"Relatorio_Executivo_SOS_{datetime.now().strftime('%d%m%Y')}.pdf",
     mime="application/pdf"
 )
 
@@ -285,7 +333,7 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DE VISUALIZAÇÃO
+# MÓDULOS DE ANÁLISE
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo de Análises de Óleo")
@@ -310,19 +358,15 @@ if opcao_menu == "📊 Dashboard Geral":
             fig_comp.update_traces(textinfo='percent+label')
             st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.subheader("Registros Salvos no Banco de Dados")
+        st.subheader("Registros da Base")
         st.dataframe(df_filtrado, use_container_width=True)
-
-        # Botão para Download dos Dados em CSV
-        csv_base = df_filtrado.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Exportar Base Consolidada (CSV)", data=csv_base, file_name="base_laudos.csv", mime="text/csv")
 
 elif opcao_menu == "📈 Séries Temporais de Elementos & ISO":
     st.title("📈 Monitoramento Temporal de Elementos, Condição & ISO 4406")
     if not df_filtrado.empty:
         df_temp = df_filtrado.sort_values(by="Data da Coleta")
         elem_selecionado = st.multiselect(
-            "Selecione os Parâmetros Químicos para Analisar:",
+            "Selecione os Parâmetros Químicos / Contagem ISO 4406 para Analisar:",
             ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "ISO4406_4u", "ISO4406_6u", "ISO4406_14u"],
             default=["Fe", "Si", "V100"]
         )
@@ -344,17 +388,46 @@ elif opcao_menu == "🚨 Ranking de Bad Actors":
             st.plotly_chart(fig_bad, use_container_width=True)
             st.dataframe(bad_actors, use_container_width=True)
 
+# ==============================================================================
+# MÓDULO ESTATÍSTICO - COMPARAÇÃO FROTA x COMPARTIMENTO COMPLETO
+# ==============================================================================
 elif opcao_menu == "🔬 Distribuição Estatística Quimica":
-    st.title("🔬 Distribuição Estatística para Elementos e Condição do Óleo")
-    if not df_filtrado.empty:
-        param = st.selectbox("Selecione o Elemento Químico:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
-        val_param = df_filtrado[param].dropna()
-        media = val_param.mean()
-        std = val_param.std() if val_param.std() > 0 else 1.0
-        fig_hist = px.histogram(df_filtrado, x=param, nbins=15, marginal="box", text_auto=True)
-        fig_hist.add_vline(x=media, line_dash="dash", line_color="green", annotation_text=f"Média: {media:.1f}")
-        st.plotly_chart(fig_hist, use_container_width=True)
-        st.dataframe(df_filtrado[["Frota", "Modelo", "Compartimento", param, "Status"]], use_container_width=True)
+    st.title("🔬 Distribuição Estatística: Comparação Frota Selecionada vs. Compartimento Global")
+    if not df_base.empty:
+        c1, c2 = st.columns(2)
+        comp_sel = c1.selectbox("Selecione o Compartimento para Benchmark Global:", list(df_base["Compartimento"].unique()))
+        param = c2.selectbox("Selecione o Elemento Químico / Propriedade:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
+        
+        # População Total do Compartimento
+        df_comp_total = df_base[df_base["Compartimento"] == comp_sel]
+        
+        # Frota Específica Dentro do Compartimento
+        frotas_comp = list(df_comp_total["Frota"].unique())
+        frota_sel = st.selectbox("Selecione a Frota Específica para Comparar:", frotas_comp)
+        df_frota_especifica = df_comp_total[df_comp_total["Frota"] == frota_sel]
+
+        if not df_comp_total.empty and not df_frota_especifica.empty:
+            m_global = df_comp_total[param].mean()
+            std_global = df_comp_total[param].std()
+            
+            m_frota = df_frota_especifica[param].mean()
+            std_frota = df_frota_especifica[param].std()
+
+            st.markdown("---")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(f"Média {param} (Compartimento Global)", f"{m_global:.1f} ppm")
+            k2.metric(f"Média {param} (Frota {frota_sel})", f"{m_frota:.1f} ppm", delta=f"{m_frota - m_global:.1f} ppm vs Global")
+            k3.metric("Desvio Padrão Global (σ)", f"{std_global:.1f}")
+            k4.metric(f"Desvio Padrão Frota {frota_sel} (σ)", f"{std_frota:.1f}")
+
+            # Gráfico de Comparação de Histogramas / Boxplot
+            fig_comp = px.histogram(
+                df_comp_total, x=param, color="Frota", barmode="overlay",
+                title=f"Distribuição de {param}: Frota {frota_sel} x Demais Frotas do Compartimento {comp_sel}",
+                marginal="box", text_auto=True
+            )
+            fig_comp.add_vline(x=m_global, line_dash="dash", line_color="red", annotation_text=f"Média Global: {m_global:.1f}")
+            st.plotly_chart(fig_comp, use_container_width=True)
 
 elif opcao_menu == "📉 Curva de Sobrevivência Interativa":
     st.title("📉 Curva de Sobrevivência (Weibull) com Cursor Móvel")
@@ -409,17 +482,23 @@ elif opcao_menu == "🔍 RCA & Gestão 5W2H":
                     "Status Execução": "Em Andamento", "Histórico de Alterações": f"Criado em {datetime.now().strftime('%d/%m/%Y %H:%M')}"
                 }
                 st.session_state.df_5w2h = pd.concat([st.session_state.df_5w2h, pd.DataFrame([novo_reg])], ignore_index=True)
-                st.success("✅ Plano 5W2H registrado na sessão!")
+                
+                # Gravação Remota na aba Plano_5W2H
+                sucesso = salvar_no_google_sheets_gspread(st.session_state.df_5w2h, "Plano_5W2H")
+                if sucesso:
+                    st.success("✅ Plano 5W2H salvo e gravado com sucesso no Google Sheets (Aba Plano_5W2H)!")
+                else:
+                    st.success("✅ Plano registrado na sessão local do Portal!")
 
         st.markdown("---")
         st.subheader("3. Gestão e Acompanhamento do 5W2H")
         st.dataframe(st.session_state.df_5w2h, use_container_width=True)
 
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
-    st.title("📥 Processamento de Laudos em PDF")
+    st.title("📥 Processamento e Gravação Permanente de Laudos em PDF")
     uploaded_files = st.file_uploader("Upload de Laudos em PDF", type=["pdf"], accept_multiple_files=True)
     if uploaded_files:
-        if st.button("🚀 Processar e Atualizar Base", type="primary"):
+        if st.button("🚀 Processar e Atualizar Google Sheets Permanentemente", type="primary"):
             novos = []
             bar = st.progress(0)
             for idx, pdf in enumerate(uploaded_files):
@@ -428,5 +507,12 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
 
             df_novos = pd.DataFrame(novos)
             st.session_state.df_base = pd.concat([st.session_state.df_base, df_novos], ignore_index=True).drop_duplicates(subset=["Nº Controle Lab"], keep="last")
-            st.success("✅ Laudos processados e salvos com sucesso na memória do portal!")
+            
+            # Gravação Remota na aba Banco de Dados - Análises de Óleo
+            sucesso = salvar_no_google_sheets_gspread(st.session_state.df_base, "Banco de Dados - Análises de Óleo")
+            if sucesso:
+                st.success("✅ Base de laudos extraída e gravada com sucesso no Google Sheets!")
+            else:
+                st.success("✅ Laudos adicionados à sessão local!")
+
             st.dataframe(df_novos, use_container_width=True)
