@@ -8,7 +8,7 @@ import plotly.express as px
 from datetime import datetime
 from supabase import create_client, Client
 
-# Importações para a Geração do Relatório PDF
+# Importações para a Geração do Relatório PDF Executivo
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -25,7 +25,7 @@ st.set_page_config(
 
 URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
 
-# Conexão Oficial com o Supabase
+# Conexão Oficial com a API do Supabase
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["SUPABASE_URL"]
@@ -96,6 +96,10 @@ def salvar_laudos_supabase(df_novos):
             "ISO4406_4u": "iso_4u", "ISO4406_6u": "iso_6u", "ISO4406_14u": "iso_14u",
             "Nome do Arquivo PDF": "nome_arquivo"
         })
+        
+        # Elimina duplicados no lote para evitar erros de conflito (ON CONFLICT)
+        df_para_banco = df_para_banco.drop_duplicates(subset=["controle_lab"], keep="last")
+        
         registros = df_para_banco.to_dict(orient="records")
         supabase.table("laudos_sos").upsert(registros).execute()
         st.cache_data.clear()
@@ -189,8 +193,10 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
 
     story.append(Paragraph("<b>3. Avaliação Estatística de Metais e Condição</b>", subtitle_style))
     if not df_dados.empty:
-        fe_med, fe_max = df_dados["Fe"].mean(), df_dados["Fe"].max() if "Fe" in df_dados.columns else (0,0)
-        si_med, si_max = df_dados["Si"].mean(), df_dados["Si"].max() if "Si" in df_dados.columns else (0,0)
+        fe_med = df_dados["Fe"].mean() if "Fe" in df_dados.columns else 0
+        fe_max = df_dados["Fe"].max() if "Fe" in df_dados.columns else 0
+        si_med = df_dados["Si"].mean() if "Si" in df_dados.columns else 0
+        si_max = df_dados["Si"].max() if "Si" in df_dados.columns else 0
         v100_med = df_dados["V100"].mean() if "V100" in df_dados.columns else 0
         
         stat_data = [
@@ -234,7 +240,7 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
     return buffer
 
 # ==============================================================================
-# PARSER EXTRAÇÃO SOTREQ / CATERPILLAR
+# PARSER FIDEDIGNO SOTREQ / CATERPILLAR
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -321,7 +327,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# MENU LATERAL
+# MENU LATERAL E FILTROS
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
@@ -369,7 +375,7 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DO PORTAL
+# MÓDULOS DE VISUALIZAÇÃO
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo de Análises de Óleo")
@@ -519,7 +525,11 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
                 bar.progress((idx + 1) / len(uploaded_files))
 
             df_novos = pd.DataFrame(novos)
+            
+            # Garante que não hajam registros duplicados no mesmo lote de upload
+            df_novos = df_novos.drop_duplicates(subset=["Nº Controle Lab"], keep="last")
+            
             sucesso = salvar_laudos_supabase(df_novos)
             if sucesso:
-                st.success(f"✅ {len(df_novos)} laudos salvos e persistidos com sucesso no Supabase!")
+                st.success(f"✅ {len(df_novos)} laudos únicos processados e salvos com sucesso no Supabase!")
             st.dataframe(df_novos, use_container_width=True)
