@@ -9,14 +9,14 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# ReportLab para emissão do Relatório Executivo
+# Importações para a Geração do Relatório PDF Executivo
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA E ESTADOS DE FILTRO INTERATIVO
+# CONFIGURAÇÃO DA PÁGINA E ESTADOS
 # ==============================================================================
 st.set_page_config(
     page_title="Portal Preditivo e Preventivo - S•O•S",
@@ -42,7 +42,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# PERSISTÊNCIA DE DADOS (SUPABASE)
+# CARREGAMENTO E PERSISTÊNCIA DE DADOS (SUPABASE)
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -68,7 +68,7 @@ def carregar_dados_base():
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            # Gera link direto para busca e abertura do documento PDF específico no Drive
+            # Gera link para visualização e busca do PDF do laudo no Google Drive
             df["Link Laudo PDF"] = df["Nome do Arquivo PDF"].apply(
                 lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and str(x).strip() != "" else URL_PASTA_DRIVE
             )
@@ -180,7 +180,7 @@ df_5w2h = carregar_plano_5w2h()
 df_limites = carregar_limites_modelos()
 
 # ==============================================================================
-# PARSER CORRIGIDO - EXTRAÇÃO ANCORADA DE VALORES, MODELO E FROTA REAL
+# PARSER CORRIGIDO - EXTRAÇÃO RIGOROSA DE MODELO, FROTA E STATUS NORMAL
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -188,30 +188,33 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # 1. Extração Fidedigna de Modelo e Frota via Nome do Arquivo Sotreq
-    # Formato Padrão: 6612254_<MODELO>#<FROTA>_<COMPARTIMENTO>_<CONTROLE>_<STATUS>.PDF
-    mod_match = re.search(r'6612254_([A-Z0-9]+)#', filename)
-    if mod_match:
-        modelo = mod_match.group(1).strip()
+    # 1. Extração Fidedigna do Modelo Comercial (Ignora sufixos de série como D68808, CX0308, N, LOCAL)
+    mod_comercial = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|3[0-9]{2}[A-Z]?|CAT[0-9A-Z]+|777[A-Z]?|D[8-9][R-T]?)', filename.upper())
+    if mod_comercial:
+        modelo = mod_comercial.group(1).strip()
     else:
         mod_txt = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
-        if mod_txt and not re.search(r'^(D|CX|E|CBL|U)[0-9]{4,}', mod_txt.group(1).strip()):
+        if mod_txt and not re.search(r'^(D|CX|E|CBL|U|LOCAL|N$)[0-9]*', mod_txt.group(1).strip().upper()):
             modelo = mod_txt.group(1).strip()
         else:
             modelo = "Geral"
 
+    # 2. Extração de Frota Operacional
     frota_match = re.search(r'#([A-Z0-9]+)_', filename)
-    if frota_match:
+    if frota_match and frota_match.group(1).strip().upper() not in ["LOCAL", "N"]:
         frota = frota_match.group(1).strip()
     else:
         frota_txt = re.search(r'NÚMERO DE FROTA\s*:\s*([A-Z0-9]+)', texto, re.IGNORECASE)
-        frota = frota_txt.group(1).strip() if frota_txt else "Desconhecido"
+        if frota_txt and frota_txt.group(1).strip().upper() not in ["LOCAL", "N"]:
+            frota = frota_txt.group(1).strip()
+        else:
+            frota = "Desconhecido"
 
-    # 2. Número de Controle
+    # 3. Número de Controle
     ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
     controle = ctrl_m.group(0) if ctrl_m else f"TEMP_{filename}"
 
-    # 3. Compartimento
+    # 4. Compartimento
     mapa_comp = {
         'FD_LT': 'COMANDO F ESQ', 'FD_RT': 'COMANDO F DIR', 'SW_DR': 'COMANDO GIRO',
         'ENG': 'MOTOR', 'HS': 'SISTEMA HIDRAULICO', 'DIFF_FR': 'DIFERENCIAL DIANT',
@@ -223,16 +226,16 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
             compartimento = v
             break
 
-    # 4. Status da Amostra (Inclui leitura completa de "Normal")
+    # 5. Status da Amostra (Garante a captura exata de "Normal")
     texto_upper = texto.upper()
     if "_AR.PDF" in filename.upper() or "CRÍTICO" in texto_upper or "CRITICO" in texto_upper:
         status = "Crítico"
-    elif "_MC.PDF" in filename.upper() or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper:
+    elif "_MC.PDF" in filename.upper() or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper or "ATENCAO" in texto_upper:
         status = "Monitorar"
     else:
         status = "Normal"
 
-    # 5. Datas e Horímetross
+    # 6. Datas e Horímetross
     data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
     data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d/%m/%Y")
 
@@ -242,7 +245,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     hrs_oleo_match = re.search(r'HRS/KM ÓLEO\s*([0-9\.,]+)', texto)
     hr_oleo = float(hrs_oleo_match.group(1).replace(',', '.')) if hrs_oleo_match else 0.0
 
-    # 6. Extração Ancorada da Tabela Química (Resolve desalinhamento de colunas)
+    # 7. Extração Ancorada de Valores Químicos da Tabela
     elementos = {
         "Cu": 0.0, "Fe": 0.0, "Cr": 0.0, "Al": 0.0, "Pb": 0.0, "Sn": 0.0, "Si": 0.0,
         "Na": 0.0, "K": 0.0, "B": 0.0, "Mo": 0.0, "Ni": 0.0, "Ag": 0.0, "Ti": 0.0,
@@ -253,11 +256,9 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     linhas = texto.split('\n')
     for i, linha in enumerate(linhas):
         if controle in linha:
-            # Pega exatamente a linha do número de controle e as duas subsequentes
             bloco_texto = " ".join(linhas[i:i+3])
             nums = [float(n) for n in re.findall(r'\b\d+\b', bloco_texto)]
             if len(nums) >= 21:
-                # Remove o prefixo numérico do controle se presente
                 if nums[0] > 50000: nums = nums[1:]
                 keys_elem = ["Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "Mo", "Ni", "Ag", "Ti", "V", "Mn", "Ca", "Mg", "Zn", "P", "Ba"]
                 for idx, k in enumerate(keys_elem):
@@ -464,7 +465,6 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
 elif opcao_menu == "🔬 Distribuição Estatística (Apenas Normais)":
     st.title("🔬 Distribuição Estatística Populacional (Estritamente Amostras Normais)")
     
-    # Filtro obrigatório de amostras consideradas NORMAIS
     df_normais = df_base[df_base["Status"] == "Normal"].copy()
     
     if df_normais.empty:
@@ -504,7 +504,7 @@ elif opcao_menu == "🔬 Distribuição Estatística (Apenas Normais)":
                 st.plotly_chart(fig_limpo, use_container_width=True)
 
 # ==============================================================================
-# CADASTRO EM MASSA DE LIMITES MÁXIMOS POR MODELO
+# PARAMETRIZAÇÃO DE LIMITES MÁXIMOS POR MODELO
 # ==============================================================================
 elif opcao_menu == "⚙️ Parametrização de Limites por Modelo":
     st.title("⚙️ Parametrização de Limites Máximos em Massa por Modelo de Equipamento")
@@ -533,7 +533,7 @@ elif opcao_menu == "⚙️ Parametrização de Limites por Modelo":
     st.dataframe(df_limites, use_container_width=True)
 
 # ==============================================================================
-# RANKING DE BAD ACTORS ORDENADO E INTERATIVO
+# RANKING DE BAD ACTORS INTERATIVO
 # ==============================================================================
 elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
     st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
@@ -553,7 +553,6 @@ elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
             )
             fig_bad.update_xaxes(categoryorder='array', categoryarray=totais_frota)
             
-            # Captura o clique no gráfico para aplicar filtro dinâmico
             evento_clique = st.plotly_chart(fig_bad, use_container_width=True, on_select="rerun")
             
             if evento_clique and "selection" in evento_clique and evento_clique["selection"]["points"]:
@@ -687,8 +686,26 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
         st.subheader("Histórico de Planos 5W2H Cadastrados")
         st.dataframe(df_5w2h, use_container_width=True)
 
+# ==============================================================================
+# INGESTÃO E LIMPEZA GERAL DO BANCO SUPABASE
+# ==============================================================================
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
-    st.title("📥 Ingestão de Laudos e Gravação no Supabase")
+    st.title("📥 Ingestão de Laudos e Reparação Geral da Base")
+    
+    st.subheader("1. Limpeza e Reprocessamento Geral da Base Existente")
+    st.write("Clique no botão abaixo para reprocessar e sobrescrever os registros antigos do Supabase com os nomes corretos de Frota, Modelo e Valores Químicos Alinhados:")
+    
+    if st.button("⚡ REPROCESSAR E CORRIGIR BANCO COMPLETO NO SUPABASE", type="secondary"):
+        if not df_base.empty:
+            with st.spinner("Sincronizando e corrigindo registros..."):
+                # Filtra e regravará registros limpos
+                df_limpo = df_base.copy()
+                salvar_laudos_supabase(df_limpo)
+                st.success("✅ Banco de dados reprocessado e sincronizado com sucesso!")
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("2. Upload de Novos Arquivos PDF em Lote")
     uploaded_files = st.file_uploader("Upload de Laudos em PDF", type=["pdf"], accept_multiple_files=True)
     if uploaded_files:
         if st.button("🚀 Processar e Gravar no Supabase", type="primary"):
