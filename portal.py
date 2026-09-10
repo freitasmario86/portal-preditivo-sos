@@ -34,10 +34,14 @@ def carregar_dados():
             "Status", "Horímetro Equip", "Horímetro Óleo", "Nº Controle Lab", "Nome do Arquivo PDF"
         ])
 
-df_base = carregar_dados()
+# Inicializa Session State para os dados persistirem sem erro de conexão
+if "df_base" not in st.session_state:
+    st.session_state.df_base = carregar_dados()
+
+df_base = st.session_state.df_base
 
 # ==============================================================================
-# EXTRAÇÃO DE PDF SOTREQ
+# FUNÇÃO DE EXTRAÇÃO DE PDF SOTREQ / CATERPILLAR
 # ==============================================================================
 def extrair_dados_pdf(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -91,29 +95,29 @@ def extrair_dados_pdf(file_bytes, filename):
     }
 
 # ==============================================================================
-# MENU LATERAL - FILTROS DINÂMICOS & NAVEGAÇÃO
+# FILTROS LATERAIS
 # ==============================================================================
 st.sidebar.title("🛠️ Filtros do Portal")
 
-# Filtros
-empresas = ["Todas"] + list(df_base["Cliente"].unique()) if "Cliente" in df_base.columns else ["Todas"]
+empresas = ["Todas"] + list(df_base["Cliente"].unique()) if "Cliente" in df_base.columns and not df_base.empty else ["Todas"]
 f_empresa = st.sidebar.selectbox("Empresa / Cliente:", empresas)
 
-modelos = ["Todos"] + list(df_base["Modelo"].unique()) if "Modelo" in df_base.columns else ["Todos"]
+modelos = ["Todos"] + list(df_base["Modelo"].unique()) if "Modelo" in df_base.columns and not df_base.empty else ["Todos"]
 f_modelo = st.sidebar.selectbox("Modelo de Equipamento:", modelos)
 
-frotas = ["Todas"] + list(df_base["Frota"].unique()) if "Frota" in df_base.columns else ["Todas"]
+frotas = ["Todas"] + list(df_base["Frota"].unique()) if "Frota" in df_base.columns and not df_base.empty else ["Todas"]
 f_frota = st.sidebar.selectbox("Número de Frota:", frotas)
 
-comps = ["Todos"] + list(df_base["Compartimento"].unique()) if "Compartimento" in df_base.columns else ["Todos"]
+comps = ["Todos"] + list(df_base["Compartimento"].unique()) if "Compartimento" in df_base.columns and not df_base.empty else ["Todos"]
 f_comp = st.sidebar.selectbox("Compartimento Analisado:", comps)
 
 # Aplicação de Filtros
 df_filtrado = df_base.copy()
-if f_empresa != "Todas": df_filtrado = df_filtrado[df_filtrado["Cliente"] == f_empresa]
-if f_modelo != "Todos": df_filtrado = df_filtrado[df_filtrado["Modelo"] == f_modelo]
-if f_frota != "Todas": df_filtrado = df_filtrado[df_filtrado["Frota"] == f_frota]
-if f_comp != "Todos": df_filtrado = df_filtrado[df_filtrado["Compartimento"] == f_comp]
+if not df_filtrado.empty:
+    if f_empresa != "Todas": df_filtrado = df_filtrado[df_filtrado["Cliente"] == f_empresa]
+    if f_modelo != "Todos": df_filtrado = df_filtrado[df_filtrado["Modelo"] == f_modelo]
+    if f_frota != "Todas": df_filtrado = df_filtrado[df_filtrado["Frota"] == f_frota]
+    if f_comp != "Todos": df_filtrado = df_filtrado[df_filtrado["Compartimento"] == f_comp]
 
 st.sidebar.markdown("---")
 opcao_menu = st.sidebar.radio(
@@ -135,23 +139,26 @@ opcao_menu = st.sidebar.radio(
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo e Preventivo")
     
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total de Amostras", len(df_filtrado))
-    k2.metric("Críticos", len(df_filtrado[df_filtrado["Status"] == "Crítico"]))
-    k3.metric("Monitorar", len(df_filtrado[df_filtrado["Status"] == "Monitorar"]))
-    k4.metric("Normais", len(df_filtrado[df_filtrado["Status"] == "Normal"]))
+    if df_filtrado.empty:
+        st.info("💡 A base está vazia. Importe arquivos PDF no menu 'Importar Laudos (PDF)' para visualização dos gráficos.")
+    else:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total de Amostras", len(df_filtrado))
+        k2.metric("Críticos", len(df_filtrado[df_filtrado["Status"] == "Crítico"]))
+        k3.metric("Monitorar", len(df_filtrado[df_filtrado["Status"] == "Monitorar"]))
+        k4.metric("Normais", len(df_filtrado[df_filtrado["Status"] == "Normal"]))
 
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Distribuição de Criticidade")
-        st.bar_chart(df_filtrado["Status"].value_counts())
-    with col2:
-        st.subheader("Amostras por Compartimento")
-        st.bar_chart(df_filtrado["Compartimento"].value_counts())
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Distribuição de Criticidade")
+            st.bar_chart(df_filtrado["Status"].value_counts())
+        with col2:
+            st.subheader("Amostras por Compartimento")
+            st.bar_chart(df_filtrado["Compartimento"].value_counts())
 
-    st.subheader("Visão Geral das Amostras Filtradas")
-    st.dataframe(df_filtrado, use_container_width=True)
+        st.subheader("Visão Geral das Amostras")
+        st.dataframe(df_filtrado, use_container_width=True)
 
 # ==============================================================================
 # 2. PARETO BAD ACTOR LIST & MTBF
@@ -159,18 +166,21 @@ if opcao_menu == "📊 Dashboard Geral":
 elif opcao_menu == "🚨 Pior Ativo (Bad Actors) & MTBF":
     st.title("🚨 Lista de Piores Ativos (Bad Actors) & Confiabilidade")
     
-    col_bad, col_mtbf = st.columns(2)
-    
-    with col_bad:
-        st.subheader("Matriz de Pior Ativo (Ranking de Reincidência Critica)")
-        criticos = df_filtrado[df_filtrado["Status"].isin(["Crítico", "Monitorar"])]
-        bad_actors = criticos.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
-        bad_actors = bad_actors.sort_values(by="Ocorrências Críticas", ascending=False)
-        st.dataframe(bad_actors, use_container_width=True)
+    if not df_filtrado.empty:
+        col_bad, col_mtbf = st.columns(2)
+        
+        with col_bad:
+            st.subheader("Matriz de Pior Ativo (Ranking de Reincidência Crítica)")
+            criticos = df_filtrado[df_filtrado["Status"].isin(["Crítico", "Monitorar"])]
+            if not criticos.empty:
+                bad_actors = criticos.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
+                bad_actors = bad_actors.sort_values(by="Ocorrências Críticas", ascending=False)
+                st.dataframe(bad_actors, use_container_width=True)
+            else:
+                st.success("Nenhum ativo em estado crítico no filtro selecionado.")
 
-    with col_mtbf:
-        st.subheader("Tempo Médio Entre Falhas (MTBF)")
-        if not df_filtrado.empty:
+        with col_mtbf:
+            st.subheader("Tempo Médio Entre Falhas (MTBF)")
             frotas_lista = df_filtrado["Frota"].unique()
             dados_mtbf = []
             for f in frotas_lista:
@@ -195,9 +205,6 @@ elif opcao_menu == "📈 Tendência & Intervalo de Amostragem":
         
         st.subheader("Histórico de Coletas e Deltas de Horímetro")
         st.dataframe(df_ord[["Data da Coleta", "Frota", "Compartimento", "Horímetro Equip", "Intervalo Amostra (Δ Horímetro)", "Horímetro Óleo", "Status"]], use_container_width=True)
-        
-        st.subheader("Evolução do Horímetro do Equipamento")
-        st.line_chart(df_ord.set_index("Horímetro Equip")["Horímetro Óleo"])
 
 # ==============================================================================
 # 4. ANÁLISE ESTATÍSTICA (DISPERSÃO & DESVIO PADRÃO)
@@ -243,21 +250,13 @@ elif opcao_menu == "🔬 Distribuição Estatística (Sigma)":
 elif opcao_menu == "📉 Sobrevivência (Weibull & Risco)":
     st.title("📉 Curva de Sobrevivência (Weibull) & Análise de Risco")
     
-    st.subheader("Estimativa de Confiabilidade do Componente R(t)")
-    st.markdown("""
-    A análise de Weibull identifica a fase de vida útil do componente:
-    * **Beta (β) < 1.0**: Falhas infantis (defeitos de montagem/óleo contaminado na troca).
-    * **Beta (β) = 1.0**: Falhas aleatórias.
-    * **Beta (β) > 1.0**: Desgaste por fim de vida útil (Wear-out).
-    """)
-    
     if not df_filtrado.empty:
         horas = df_filtrado["Horímetro Óleo"].sort_values().values
         horas = horas[horas > 0]
         
         if len(horas) > 2:
             n = len(horas)
-            p = (np.arange(1, n + 1) - 0.3) / (n + 0.4) # Median Ranks
+            p = (np.arange(1, n + 1) - 0.3) / (n + 0.4)
             y = np.log(-np.log(1 - p))
             x = np.log(horas)
             
@@ -281,33 +280,42 @@ elif opcao_menu == "📉 Sobrevivência (Weibull & Risco)":
 elif opcao_menu == "🔍 Causa Raiz (RCA)":
     st.title("🔍 Análise de Causa Raiz (RCA) - Matriz de Diagnóstico")
     
-    st.subheader("Matriz Preditiva de Diagnóstico e Ações Recomendadas")
-    
     rca_matrix = pd.DataFrame([
         {"Sintoma / Elemento": "Alta de Silício (Si) + Alumínio (Al)", "Causa Provável": "Entrada de poeira / sujeira externa", "Ação Tática / Operacional": "Inspecionar vedação do filtro de ar, dutos de admissão e respiros."},
         {"Sintoma / Elemento": "Alta de Ferro (Fe) + Cromo (Cr)", "Causa Provável": "Desgaste de camisas, anéis ou engrenagens", "Ação Tática / Operacional": "Programar boroscopia do compartimento e verificar ruídos."},
         {"Sintoma / Elemento": "Presença de Água (H2O) / Viscosidade Alterada", "Causa Provável": "Infiltração pelo respiro ou vazamento em arrefecedor", "Ação Tática / Operacional": "Verificar trocador de calor e vedação da vareta/bocal."},
         {"Sintoma / Elemento": "Queda Acentuada de Viscosidade", "Causa Provável": "Diluição por combustível", "Ação Tática / Operacional": "Checar bicos injetores e conexões da linha de combustível."}
     ])
-    
     st.table(rca_matrix)
 
 # ==============================================================================
-# 7. IMPORTAR LAUDOS (PDF)
+# 7. IMPORTAR LAUDOS (PDF) - SEM ERRO DE ESCRITA
 # ==============================================================================
 elif opcao_menu == "📥 Importar Laudos (PDF)":
     st.title("📥 Processamento de Laudos em PDF")
     
     uploaded_files = st.file_uploader("Upload de Laudos Sotreq / Caterpillar", type=["pdf"], accept_multiple_files=True)
     if uploaded_files:
-        if st.button("🚀 Extrair Dados e Salvar no Google Sheets"):
+        if st.button("🚀 Processar e Atualizar Portal"):
             novos = []
-            for pdf in uploaded_files:
+            bar = st.progress(0)
+            for idx, pdf in enumerate(uploaded_files):
                 novos.append(extrair_dados_pdf(pdf, pdf.name))
+                bar.progress((idx + 1) / len(uploaded_files))
             
             df_n = pd.DataFrame(novos)
-            df_comb = pd.concat([df_base, df_n], ignore_index=True).drop_duplicates(subset=["Nome do Arquivo PDF"])
-            conn.update(spreadsheet=URL_PLANILHA, data=df_comb)
-            st.cache_data.clear()
-            st.success("✅ Base atualizada com sucesso no Google Sheets!")
+            
+            # Atualiza o estado da aplicação localmente
+            st.session_state.df_base = pd.concat([st.session_state.df_base, df_n], ignore_index=True).drop_duplicates(subset=["Nome do Arquivo PDF"])
+            
+            st.success(f"✅ {len(df_n)} laudo(s) extraído(s) com sucesso e anexado(s) à sessão!")
             st.dataframe(df_n, use_container_width=True)
+
+            # Oferece o download da base consolidada em CSV
+            csv_data = st.session_state.df_base.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="💾 Baixar Base Consolidada Atualizada (CSV)",
+                data=csv_data,
+                file_name="base_laudos_atualizada.csv",
+                mime="text/csv"
+            )
