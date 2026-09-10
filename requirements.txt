@@ -10,3 +10,4 @@ st-gsheets-connection
 plotly
 google-api-python-client
 google-auth
+gdown
