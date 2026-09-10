@@ -3,16 +3,14 @@ import pandas as pd
 import numpy as np
 import pypdf
 import re
-import gspread
 from io import BytesIO
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
-from streamlit_gsheets import GSheetsConnection
+from st_supabase_connection import SupabaseConnection
 
 # Importações do ReportLab para Relatório Executivo Avançado
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -25,64 +23,101 @@ st.set_page_config(
     layout="wide"
 )
 
-URL_PLANILHA = "https://docs.google.com/spreadsheets/d/1hnntl9LfTqvPabewBU3PnNuZezREWi-3A5lmUM9GEwY/edit"
 URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
 
-conn = st.connection("gsheets", type=GSheetsConnection)
+# Conexão Nativa com o Supabase
+supabase_conn = st.connection("supabase", type=SupabaseConnection)
 
 # ==============================================================================
-# FUNÇÃO DE GRAVAÇÃO DIRETA NO GOOGLE SHEETS VIA SERVICE ACCOUNT
+# LEITURA E ESCRITA VIA SUPABASE (SEM RETRABALHO OU LENTIDÃO)
 # ==============================================================================
-def salvar_no_google_sheets_gspread(df, aba_nome):
-    try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            gc = gspread.service_account_from_dict(creds_dict)
-            sh = gc.open_by_url(URL_PLANILHA)
-            
-            try:
-                worksheet = sh.worksheet(aba_nome)
-            except Exception:
-                worksheet = sh.add_worksheet(title=aba_nome, rows=1000, cols=40)
-            
-            df_str = df.astype(str)
-            worksheet.clear()
-            worksheet.update([df_str.columns.values.tolist()] + df_str.values.tolist())
-            return True
-        else:
-            return False
-    except Exception as e:
-        st.warning(f"Aviso de escrita remota: {e}")
-        return False
-
-# ==============================================================================
-# CARREGAMENTO DA BASE DE DADOS
-# ==============================================================================
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=10)
 def carregar_dados_base():
     try:
-        df = conn.read(spreadsheet=URL_PLANILHA, worksheet="Banco de Dados - Análises de Óleo")
-        df = df.dropna(how="all")
-        cols_num = ["Horímetro Equip", "Horímetro Óleo", "Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "Mo", "Ni", "Ag", "Ti", "V", "Mn", "Ca", "Mg", "Zn", "P", "Ba", "V100", "H2O", "ISO4406_4u", "ISO4406_6u", "ISO4406_14u"]
-        for col in cols_num:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        res = supabase_conn.table("laudos_sos").select("*").execute()
+        df = pd.DataFrame(res.data)
+        if not df.empty:
+            df = df.rename(columns={
+                "controle_lab": "Nº Controle Lab", "data_coleta": "Data da Coleta",
+                "cliente": "Cliente", "modelo": "Modelo", "frota": "Frota",
+                "compartimento": "Compartimento", "status": "Status",
+                "hr_equip": "Horímetro Equip", "hr_oleo": "Horímetro Óleo",
+                "cu": "Cu", "fe": "Fe", "cr": "Cr", "al": "Al", "pb": "Pb", "sn": "Sn",
+                "si": "Si", "na": "Na", "k": "K", "b": "B", "mo": "Mo", "ni": "Ni",
+                "ag": "Ag", "ti": "Ti", "v": "V", "mn": "Mn", "ca": "Ca", "mg": "Mg",
+                "zn": "Zn", "p": "P", "ba": "Ba", "v100": "V100", "h2o": "H2O",
+                "iso_4u": "ISO4406_4u", "iso_6u": "ISO4406_6u", "iso_14u": "ISO4406_14u",
+                "nome_arquivo": "Nome do Arquivo PDF"
+            })
+            cols_num = ["Horímetro Equip", "Horímetro Óleo", "Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "Mo", "Ni", "Ag", "Ti", "V", "Mn", "Ca", "Mg", "Zn", "P", "Ba", "V100", "H2O", "ISO4406_4u", "ISO4406_6u", "ISO4406_14u"]
+            for col in cols_num:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         return df
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=10)
 def carregar_plano_5w2h():
     try:
-        df = conn.read(spreadsheet=URL_PLANILHA, worksheet="Plano_5W2H")
-        return df.dropna(how="all")
+        res = supabase_conn.table("plano_5w2h").select("*").execute()
+        df = pd.DataFrame(res.data)
+        if not df.empty:
+            df = df.rename(columns={
+                "controle_lab": "Nº Controle Lab", "data_registro": "Data Registro",
+                "frota": "Frota", "modelo": "Modelo", "compartimento": "Compartimento",
+                "status_amostra": "Status Amostra", "what": "O Que (What)", "why": "Por Que (Why)",
+                "where": "Onde (Where)", "when_prazo": "Quando / Prazo (When)",
+                "who_resp": "Quem / Responsável (Who)", "email_resp": "E-mail Responsável",
+                "how": "Como (How)", "how_much": "Quanto Custa (How Much)",
+                "status_execucao": "Status Execução", "historico": "Histórico de Alterações"
+            })
+        return df
     except Exception:
-        return pd.DataFrame(columns=[
-            "Data Registro", "Nº Controle Lab", "Frota", "Modelo", "Compartimento", 
-            "Status Amostra", "O Que (What)", "Por Que (Why)", "Onde (Where)", 
-            "Quando / Prazo (When)", "Quem / Responsável (Who)", "E-mail Responsável", 
-            "Como (How)", "Quanto Custa (How Much)", "Status Execução", "Histórico de Alterações"
-        ])
+        return pd.DataFrame()
+
+def salvar_laudos_supabase(df_novos):
+    try:
+        df_para_banco = df_novos.rename(columns={
+            "Nº Controle Lab": "controle_lab", "Data da Coleta": "data_coleta",
+            "Cliente": "cliente", "Modelo": "modelo", "Frota": "frota",
+            "Compartimento": "compartimento", "Status": "status",
+            "Horímetro Equip": "hr_equip", "Horímetro Óleo": "hr_oleo",
+            "Cu": "cu", "Fe": "fe", "Cr": "cr", "Al": "al", "Pb": "pb", "Sn": "sn",
+            "Si": "si", "Na": "na", "K": "k", "B": "b", "Mo": "mo", "Ni": "ni",
+            "Ag": "ag", "Ti": "ti", "V": "v", "Mn": "mn", "Ca": "ca", "Mg": "mg",
+            "Zn": "zn", "P": "p", "Ba": "ba", "V100": "v100", "H2O": "h2o",
+            "ISO4406_4u": "iso_4u", "ISO4406_6u": "iso_6u", "ISO4406_14u": "iso_14u",
+            "Nome do Arquivo PDF": "nome_arquivo"
+        })
+        registros = df_para_banco.to_dict(orient="records")
+        supabase_conn.table("laudos_sos").upsert(registros).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar no Supabase: {e}")
+        return False
+
+def salvar_5w2h_supabase(df_5w2h):
+    try:
+        df_p = df_5w2h.rename(columns={
+            "Nº Controle Lab": "controle_lab", "Data Registro": "data_registro",
+            "Frota": "frota", "Modelo": "modelo", "Compartimento": "compartimento",
+            "Status Amostra": "status_amostra", "O Que (What)": "what", "Por Que (Why)": "why",
+            "Onde (Where)": "where", "Quando / Prazo (When)": "when_prazo",
+            "Quem / Responsável (Who)": "who_resp", "E-mail Responsável": "email_resp",
+            "Como (How)": "how", "Quanto Custa (How Much)": "how_much",
+            "Status Execução": "status_execucao", "Histórico de Alterações": "historico"
+        })
+        if "id" in df_p.columns:
+            df_p = df_p.drop(columns=["id"])
+        registros = df_p.to_dict(orient="records")
+        supabase_conn.table("plano_5w2h").insert(registros).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao gravar 5W2H no Supabase: {e}")
+        return False
 
 if "df_base" not in st.session_state:
     st.session_state.df_base = carregar_dados_base()
@@ -93,19 +128,18 @@ if "df_5w2h" not in st.session_state:
 df_base = st.session_state.df_base
 
 # ==============================================================================
-# GERADOR DE RELATÓRIO PDF EXECUTIVO COMPLETO (TODOS OS MÓDULOS)
+# GERADOR DE RELATÓRIO PDF EXECUTIVO COMPLETO
 # ==============================================================================
 def gerar_relatorio_pdf_completo(df_dados, df_planos):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     story = []
-    
     styles = getSampleStyleSheet()
+    
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor("#0F172A"), spaceAfter=10)
     subtitle_style = ParagraphStyle('SubtitleStyle', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor("#1E3A8A"), spaceAfter=6)
     body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=9, leading=12)
 
-    # 1. Capa e Resumo Executivo
     story.append(Paragraph("<b>RELATÓRIO TÉCNICO DE ENGENHARIA DE CONFIABILIDADE S•O•S</b>", title_style))
     story.append(Paragraph(f"Data da Emissão: {datetime.now().strftime('%d/%m/%Y %H:%M')} | Cliente: 3 SKAVAMINAS", body_style))
     story.append(Spacer(1, 10))
@@ -129,7 +163,6 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
     story.append(kpi_table)
     story.append(Spacer(1, 15))
 
-    # 2. Ranking de Bad Actors
     story.append(Paragraph("<b>2. Ranking de Piores Ativos (Bad Actors)</b>", subtitle_style))
     if not df_dados.empty:
         df_crit = df_dados[df_dados["Status"].isin(["Crítico", "Monitorar"])]
@@ -148,12 +181,11 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
             story.append(t_bad)
     story.append(Spacer(1, 15))
 
-    # 3. Análise Estatística Quimica e Diagnóstico
-    story.append(Paragraph("<b>3. Avaliação Estatística de Metais e Condição (Média e Dispersão)</b>", subtitle_style))
+    story.append(Paragraph("<b>3. Avaliação Estatística de Metais e Condição</b>", subtitle_style))
     if not df_dados.empty:
-        fe_med, fe_max = df_dados["Fe"].mean(), df_dados["Fe"].max()
-        si_med, si_max = df_dados["Si"].mean(), df_dados["Si"].max()
-        v100_med = df_dados["V100"].mean()
+        fe_med, fe_max = df_dados["Fe"].mean(), df_dados["Fe"].max() if "Fe" in df_dados.columns else (0,0)
+        si_med, si_max = df_dados["Si"].mean(), df_dados["Si"].max() if "Si" in df_dados.columns else (0,0)
+        v100_med = df_dados["V100"].mean() if "V100" in df_dados.columns else 0
         
         stat_data = [
             ["Parâmetro Químico", "Média Geral (ppm / cSt)", "Máximo Encontrado", "Status da População"],
@@ -171,7 +203,6 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
         story.append(t_stat)
     story.append(Spacer(1, 15))
 
-    # 4. Plano de Ação 5W2H
     story.append(Paragraph("<b>4. Plano de Ação 5W2H Cadastrado</b>", subtitle_style))
     if not df_planos.empty:
         p_data = [["Frota", "O Que Fazer (What)", "Responsável", "Prazo", "Status"]]
@@ -197,7 +228,7 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
     return buffer
 
 # ==============================================================================
-# PARSER EXTRAÇÃO DE LAUDOS SOTREQ
+# PARSER FIDEDIGNO SOTREQ / CATERPILLAR
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -278,14 +309,13 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         "Horímetro Equip": hr_equip,
         "Horímetro Óleo": hr_oleo,
         "Nº Controle Lab": controle,
-        "Link Laudo PDF": URL_PASTA_DRIVE,
         "Nome do Arquivo PDF": filename
     }
     dados_finais.update(elementos)
     return dados_finais
 
 # ==============================================================================
-# FILTROS LATERAIS E MENU
+# MENU LATERAL
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
@@ -333,11 +363,10 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DE ANÁLISE
+# MÓDULOS DO PORTAL
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo de Análises de Óleo")
-    
     if not df_filtrado.empty:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total de Amostras", len(df_filtrado))
@@ -347,18 +376,14 @@ if opcao_menu == "📊 Dashboard Geral":
 
         col1, col2 = st.columns(2)
         with col1:
-            fig_status = px.bar(
-                df_filtrado["Status"].value_counts().reset_index(), 
-                x='Status', y='count', title="Distribuição de Criticidade", 
-                text_auto=True, color='Status'
-            )
+            fig_status = px.bar(df_filtrado["Status"].value_counts().reset_index(), x='Status', y='count', title="Distribuição de Criticidade", text_auto=True, color='Status')
             st.plotly_chart(fig_status, use_container_width=True)
         with col2:
             fig_comp = px.pie(df_filtrado, names="Compartimento", title="Amostras por Compartimento", hole=0.4)
             fig_comp.update_traces(textinfo='percent+label')
             st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.subheader("Registros da Base")
+        st.subheader("Base de Dados Carregada do Supabase")
         st.dataframe(df_filtrado, use_container_width=True)
 
 elif opcao_menu == "📈 Séries Temporais de Elementos & ISO":
@@ -388,42 +413,30 @@ elif opcao_menu == "🚨 Ranking de Bad Actors":
             st.plotly_chart(fig_bad, use_container_width=True)
             st.dataframe(bad_actors, use_container_width=True)
 
-# ==============================================================================
-# MÓDULO ESTATÍSTICO - COMPARAÇÃO FROTA x COMPARTIMENTO COMPLETO
-# ==============================================================================
 elif opcao_menu == "🔬 Distribuição Estatística Quimica":
-    st.title("🔬 Distribuição Estatística: Comparação Frota Selecionada vs. Compartimento Global")
+    st.title("🔬 Distribuição Estatística: Frota Selecionada vs. Compartimento Global")
     if not df_base.empty:
         c1, c2 = st.columns(2)
         comp_sel = c1.selectbox("Selecione o Compartimento para Benchmark Global:", list(df_base["Compartimento"].unique()))
         param = c2.selectbox("Selecione o Elemento Químico / Propriedade:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
         
-        # População Total do Compartimento
         df_comp_total = df_base[df_base["Compartimento"] == comp_sel]
-        
-        # Frota Específica Dentro do Compartimento
         frotas_comp = list(df_comp_total["Frota"].unique())
         frota_sel = st.selectbox("Selecione a Frota Específica para Comparar:", frotas_comp)
         df_frota_especifica = df_comp_total[df_comp_total["Frota"] == frota_sel]
 
         if not df_comp_total.empty and not df_frota_especifica.empty:
             m_global = df_comp_total[param].mean()
-            std_global = df_comp_total[param].std()
-            
             m_frota = df_frota_especifica[param].mean()
-            std_frota = df_frota_especifica[param].std()
 
             st.markdown("---")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric(f"Média {param} (Compartimento Global)", f"{m_global:.1f} ppm")
+            k1, k2 = st.columns(2)
+            k1.metric(f"Média {param} (Compartimento Global: {comp_sel})", f"{m_global:.1f} ppm")
             k2.metric(f"Média {param} (Frota {frota_sel})", f"{m_frota:.1f} ppm", delta=f"{m_frota - m_global:.1f} ppm vs Global")
-            k3.metric("Desvio Padrão Global (σ)", f"{std_global:.1f}")
-            k4.metric(f"Desvio Padrão Frota {frota_sel} (σ)", f"{std_frota:.1f}")
 
-            # Gráfico de Comparação de Histogramas / Boxplot
             fig_comp = px.histogram(
                 df_comp_total, x=param, color="Frota", barmode="overlay",
-                title=f"Distribuição de {param}: Frota {frota_sel} x Demais Frotas do Compartimento {comp_sel}",
+                title=f"Distribuição de {param}: Frota {frota_sel} x Demais Frotas ({comp_sel})",
                 marginal="box", text_auto=True
             )
             fig_comp.add_vline(x=m_global, line_dash="dash", line_color="red", annotation_text=f"Média Global: {m_global:.1f}")
@@ -469,7 +482,7 @@ elif opcao_menu == "🔍 RCA & Gestão 5W2H":
             how = f7.text_input("Como Fazer (How):")
             cost = f8.text_input("Custo (How Much):", value="R$ 0,00")
             
-            if st.form_submit_button("🚨 REGISTRAR PLANO 5W2H"):
+            if st.form_submit_button("🚨 REGISTRAR PLANO 5W2H NO SUPABASE"):
                 novo_reg = {
                     "Data Registro": datetime.now().strftime("%d/%m/%Y %H:%M"),
                     "Nº Controle Lab": controle_sel,
@@ -481,24 +494,18 @@ elif opcao_menu == "🔍 RCA & Gestão 5W2H":
                     "Como (How)": how, "Quanto Custa (How Much)": cost,
                     "Status Execução": "Em Andamento", "Histórico de Alterações": f"Criado em {datetime.now().strftime('%d/%m/%Y %H:%M')}"
                 }
-                st.session_state.df_5w2h = pd.concat([st.session_state.df_5w2h, pd.DataFrame([novo_reg])], ignore_index=True)
-                
-                # Gravação Remota na aba Plano_5W2H
-                sucesso = salvar_no_google_sheets_gspread(st.session_state.df_5w2h, "Plano_5W2H")
-                if sucesso:
-                    st.success("✅ Plano 5W2H salvo e gravado com sucesso no Google Sheets (Aba Plano_5W2H)!")
-                else:
-                    st.success("✅ Plano registrado na sessão local do Portal!")
+                salvar_5w2h_supabase(pd.DataFrame([novo_reg]))
+                st.success("✅ Plano 5W2H gravado no banco de dados Supabase!")
 
         st.markdown("---")
-        st.subheader("3. Gestão e Acompanhamento do 5W2H")
+        st.subheader("3. Histórico de Planos 5W2H Cadastrados")
         st.dataframe(st.session_state.df_5w2h, use_container_width=True)
 
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
-    st.title("📥 Processamento e Gravação Permanente de Laudos em PDF")
+    st.title("📥 Ingestão de Laudos e Gravação no Supabase")
     uploaded_files = st.file_uploader("Upload de Laudos em PDF", type=["pdf"], accept_multiple_files=True)
     if uploaded_files:
-        if st.button("🚀 Processar e Atualizar Google Sheets Permanentemente", type="primary"):
+        if st.button("🚀 Processar e Gravar no Supabase", type="primary"):
             novos = []
             bar = st.progress(0)
             for idx, pdf in enumerate(uploaded_files):
@@ -506,13 +513,7 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
                 bar.progress((idx + 1) / len(uploaded_files))
 
             df_novos = pd.DataFrame(novos)
-            st.session_state.df_base = pd.concat([st.session_state.df_base, df_novos], ignore_index=True).drop_duplicates(subset=["Nº Controle Lab"], keep="last")
-            
-            # Gravação Remota na aba Banco de Dados - Análises de Óleo
-            sucesso = salvar_no_google_sheets_gspread(st.session_state.df_base, "Banco de Dados - Análises de Óleo")
+            sucesso = salvar_laudos_supabase(df_novos)
             if sucesso:
-                st.success("✅ Base de laudos extraída e gravada com sucesso no Google Sheets!")
-            else:
-                st.success("✅ Laudos adicionados à sessão local!")
-
+                st.success(f"✅ {len(df_novos)} laudos salvos e persistidos com sucesso no Supabase!")
             st.dataframe(df_novos, use_container_width=True)
