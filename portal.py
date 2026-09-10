@@ -6,9 +6,9 @@ import re
 from io import BytesIO
 import plotly.express as px
 from datetime import datetime
-from st_supabase_connection import SupabaseConnection
+from supabase import create_client, Client
 
-# Importações do ReportLab para Relatório Executivo Avançado
+# Importações para a Geração do Relatório PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -25,16 +25,22 @@ st.set_page_config(
 
 URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
 
-# Conexão Nativa com o Supabase
-supabase_conn = st.connection("supabase", type=SupabaseConnection)
+# Conexão Oficial com o Supabase
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["supabase"]["SUPABASE_URL"]
+    key = st.secrets["supabase"]["SUPABASE_KEY"]
+    return create_client(url, key)
+
+supabase = init_supabase()
 
 # ==============================================================================
-# LEITURA E ESCRITA VIA SUPABASE (SEM RETRABALHO OU LENTIDÃO)
+# LEITURA E ESCRITA VIA SUPABASE
 # ==============================================================================
 @st.cache_data(ttl=10)
 def carregar_dados_base():
     try:
-        res = supabase_conn.table("laudos_sos").select("*").execute()
+        res = supabase.table("laudos_sos").select("*").execute()
         df = pd.DataFrame(res.data)
         if not df.empty:
             df = df.rename(columns={
@@ -60,7 +66,7 @@ def carregar_dados_base():
 @st.cache_data(ttl=10)
 def carregar_plano_5w2h():
     try:
-        res = supabase_conn.table("plano_5w2h").select("*").execute()
+        res = supabase.table("plano_5w2h").select("*").execute()
         df = pd.DataFrame(res.data)
         if not df.empty:
             df = df.rename(columns={
@@ -91,7 +97,7 @@ def salvar_laudos_supabase(df_novos):
             "Nome do Arquivo PDF": "nome_arquivo"
         })
         registros = df_para_banco.to_dict(orient="records")
-        supabase_conn.table("laudos_sos").upsert(registros).execute()
+        supabase.table("laudos_sos").upsert(registros).execute()
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -112,7 +118,7 @@ def salvar_5w2h_supabase(df_5w2h):
         if "id" in df_p.columns:
             df_p = df_p.drop(columns=["id"])
         registros = df_p.to_dict(orient="records")
-        supabase_conn.table("plano_5w2h").insert(registros).execute()
+        supabase.table("plano_5w2h").insert(registros).execute()
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -128,7 +134,7 @@ if "df_5w2h" not in st.session_state:
 df_base = st.session_state.df_base
 
 # ==============================================================================
-# GERADOR DE RELATÓRIO PDF EXECUTIVO COMPLETO
+# GERADOR DE RELATÓRIO PDF EXECUTIVO
 # ==============================================================================
 def gerar_relatorio_pdf_completo(df_dados, df_planos):
     buffer = BytesIO()
@@ -228,7 +234,7 @@ def gerar_relatorio_pdf_completo(df_dados, df_planos):
     return buffer
 
 # ==============================================================================
-# PARSER FIDEDIGNO SOTREQ / CATERPILLAR
+# PARSER EXTRAÇÃO SOTREQ / CATERPILLAR
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
