@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# ReportLab para Emissão do Relatório PDF
+# Importações para a Geração do Relatório PDF Executivo
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -42,7 +42,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# PERSISTÊNCIA DE DADOS SUPABASE
+# CARREGAMENTO E PERSISTÊNCIA DE DADOS (SUPABASE)
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -68,6 +68,7 @@ def carregar_dados_base():
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
+            # Gera link nativo de busca direta do PDF no Google Drive
             df["Link Laudo PDF"] = df["Nome do Arquivo PDF"].apply(
                 lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and str(x).strip() != "" else URL_PASTA_DRIVE
             )
@@ -179,7 +180,7 @@ df_5w2h = carregar_plano_5w2h()
 df_limites = carregar_limites_modelos()
 
 # ==============================================================================
-# PARSER CORRIGIDO (DETECÇÃO DE _NAR.PDF / STATUS NORMAL E MODELO REAL)
+# PARSER PERFEITO: CORREÇÃO DE MODELO, FROTA, STATUS NORMAL E VALORES QUÍMICOS
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -190,7 +191,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     filename_upper = filename.upper()
     texto_upper = texto.upper()
 
-    # 1. Extração Estrita do MODELO Comercial (Descarta números isolados de 3 dígitos do controle)
+    # 1. Extração do MODELO do Equipamento (Ignora os 3 dígitos do sufixo do número de controle)
     mod_comercial = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
     if mod_comercial and not re.match(r'^[0-9]{3}$', mod_comercial.group(1).strip()):
         modelo = mod_comercial.group(1).strip()
@@ -222,7 +223,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
             compartimento = v
             break
 
-    # 5. Classificação Direta de Status (Inclui verificação explícita de _NAR.PDF para Normal)
+    # 5. Classificação Direta de Status (Atenta para a tag _NAR.PDF de laudos normais)
     if "_AR.PDF" in filename_upper or "CRÍTICO" in texto_upper or "CRITICO" in texto_upper:
         status = "Crítico"
     elif "_MC.PDF" in filename_upper or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper or "ATENCAO" in texto_upper:
@@ -242,7 +243,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     hrs_oleo_match = re.search(r'HRS/KM ÓLEO\s*([0-9\.,]+)', texto)
     hr_oleo = float(hrs_oleo_match.group(1).replace(',', '.')) if hrs_oleo_match else 0.0
 
-    # 7. Extração de Valores Químicos
+    # 7. EXTRAÇÃO ANCORADA CORRIGIDA (Remove o sufixo numérico do controle antes da leitura)
     elementos = {
         "Cu": 0.0, "Fe": 0.0, "Cr": 0.0, "Al": 0.0, "Pb": 0.0, "Sn": 0.0, "Si": 0.0,
         "Na": 0.0, "K": 0.0, "B": 0.0, "Mo": 0.0, "Ni": 0.0, "Ag": 0.0, "Ti": 0.0,
@@ -254,9 +255,12 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for i, linha in enumerate(linhas):
         if controle in linha:
             bloco_texto = " ".join(linhas[i:i+3])
-            nums = [float(n) for n in re.findall(r'\b\d+\b', bloco_texto)]
-            if len(nums) >= 21:
-                if nums[0] > 50000: nums = nums[1:]
+            # Pega o sufixo numérico do controle (ex: 0631 de U060-56075-0631) e remove do texto para não ler como Cu
+            sufixo_ctrl = controle.split("-")[-1]
+            bloco_limpo = bloco_texto.replace(controle, "").replace(sufixo_ctrl, "")
+            
+            nums = [float(n) for n in re.findall(r'\b\d+\b', bloco_limpo)]
+            if len(nums) >= 20:
                 keys_elem = ["Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "Mo", "Ni", "Ag", "Ti", "V", "Mn", "Ca", "Mg", "Zn", "P", "Ba"]
                 for idx, k in enumerate(keys_elem):
                     if idx < len(nums): elementos[k] = nums[idx]
@@ -645,12 +649,12 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
     st.title("📥 Ingestão de Laudos e Reprocessamento Limpo")
     
-    st.subheader("1. Limpar Registros Incorretos Antigos (Zerar Tabela laudos_sos)")
+    st.subheader("1. Zerar Tabela Antiga e Reprocessar com os Novos Algoritmos")
     if st.button("⚠️ ZERAR BANCO DE DADOS ANTIGO PARA RE-UPLOAD COMPLETO", type="secondary"):
         if supabase:
             supabase.table("laudos_sos").delete().neq("controle_lab", "X_INVALIDO").execute()
             st.cache_data.clear()
-            st.success("✅ Banco de dados zerado com sucesso! Agora faça o upload dos PDFs abaixo para inserir os dados limpos.")
+            st.success("✅ Base antiga removida do Supabase! Agora faça o upload abaixo para reingestão limpa.")
             st.rerun()
 
     st.markdown("---")
