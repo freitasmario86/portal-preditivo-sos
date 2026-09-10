@@ -6,3 +6,4 @@ scipy
 scikit-learn
 seaborn
 pypdf
+st-gsheets-connection
