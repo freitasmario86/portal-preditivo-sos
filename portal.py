@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# Importações do ReportLab para Relatório Executivo
+# Importações para a Geração do Relatório PDF Executivo
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -65,8 +65,10 @@ def carregar_dados_base():
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            # Garante coluna com link direto do laudo
-            df["Link PDF"] = URL_PASTA_DRIVE
+            # Gera o Link Direto de Pesquisa e Visualização do Arquivo PDF no Drive
+            df["Link Laudo PDF"] = df["Nome do Arquivo PDF"].apply(
+                lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and x != "" else URL_PASTA_DRIVE
+            )
         return df
     except Exception as e:
         st.warning(f"Aviso na leitura de laudos: {e}")
@@ -107,7 +109,7 @@ def salvar_laudos_supabase(df_novos):
             "ISO4406_4u": "iso_4u", "ISO4406_6u": "iso_6u", "ISO4406_14u": "iso_14u",
             "Nome do Arquivo PDF": "nome_arquivo"
         })
-        if "Link PDF" in df_para_banco.columns: df_para_banco = df_para_banco.drop(columns=["Link PDF"])
+        if "Link Laudo PDF" in df_para_banco.columns: df_para_banco = df_para_banco.drop(columns=["Link Laudo PDF"])
         df_para_banco = df_para_banco.drop_duplicates(subset=["controle_lab"], keep="last")
         registros = df_para_banco.to_dict(orient="records")
         supabase.table("laudos_sos").upsert(registros).execute()
@@ -116,6 +118,35 @@ def salvar_laudos_supabase(df_novos):
     except Exception as e:
         st.error(f"Erro ao gravar no Supabase: {e}")
         return False
+
+def recalcular_e_atualizar_modelos_supabase(df_atual):
+    """
+    Função de engenharia para atualizar os modelos gravados incorretamente no Supabase
+    """
+    if not supabase or df_atual.empty: return False
+    try:
+        corrigidos = 0
+        for _, r in df_atual.iterrows():
+            filename = str(r.get("Nome do Arquivo PDF", ""))
+            ctrl = str(r.get("Nº Controle Lab", ""))
+            
+            # Aplica extração rigorosa de modelo no nome do arquivo
+            mod_match = re.search(r'6612254_([A-Z0-9]+)#', filename)
+            if not mod_match:
+                mod_match = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|KT[0-9A-Z]+|J[0-9A-Z]+|D[0-9A-Z]+)', filename.upper())
+            
+            modelo_correto = mod_match.group(1).strip() if mod_match else str(r.get("Modelo", "Geral"))
+            
+            # Se o modelo atual for inválido, atualiza no Supabase
+            if r.get("Modelo") in ["N", "LOCAL", "Geral", "Desconhecido"] or r.get("Modelo") != modelo_correto:
+                supabase.table("laudos_sos").update({"modelo": modelo_correto}).eq("controle_lab", ctrl).execute()
+                corrigidos += 1
+        
+        st.cache_data.clear()
+        return corrigidos
+    except Exception as e:
+        st.error(f"Erro ao recalcular modelos: {e}")
+        return 0
 
 def salvar_5w2h_supabase(df_5w2h):
     if not supabase or df_5w2h.empty: return False
@@ -141,13 +172,8 @@ def salvar_5w2h_supabase(df_5w2h):
 def atualizar_5w2h_status_prazo(controle_lab, novo_status, novo_prazo, historico_atualizado):
     if not supabase: return False
     try:
-        payload = {
-            "status_execucao": novo_status,
-            "historico": historico_atualizado
-        }
-        if novo_prazo:
-            payload["when_prazo"] = novo_prazo
-            
+        payload = {"status_execucao": novo_status, "historico": historico_atualizado}
+        if novo_prazo: payload["when_prazo"] = novo_prazo
         supabase.table("plano_5w2h").update(payload).eq("controle_lab", controle_lab).execute()
         st.cache_data.clear()
         return True
@@ -159,7 +185,7 @@ df_base = carregar_dados_base()
 df_5w2h = carregar_plano_5w2h()
 
 # ==============================================================================
-# PARSER FIDEDIGNO E CORREÇÃO DE REGEX DO MODELO
+# EXTRAÇÃO E REGEX DO MODELO REAL
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -167,13 +193,16 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # Regex para capturar modelos reais como SY215LR, SKT110S, SKT130
-    mod_match = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|KT[0-9A-Z]+|SY[0-9A-Z]+)', filename.upper())
+    # Extração primária do modelo no nome do arquivo Sotreq
+    mod_match = re.search(r'6612254_([A-Z0-9]+)#', filename)
     if not mod_match:
-        mod_match = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
-        modelo = mod_match.group(1).strip() if mod_match and mod_match.group(1).upper() not in ["N", "LOCAL", "DO"] else "Geral"
-    else:
+        mod_match = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|KT[0-9A-Z]+|J[0-9A-Z]+|D[0-9A-Z]+)', filename.upper())
+    
+    if mod_match:
         modelo = mod_match.group(1).strip()
+    else:
+        mod_txt = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+        modelo = mod_txt.group(1).strip() if mod_txt and mod_txt.group(1).upper() not in ["N", "LOCAL", "DO"] else "Geral"
 
     frota_file = re.search(r'#([A-Z0-9]+)_', filename)
     frota = frota_file.group(1) if frota_file else "Desconhecido"
@@ -255,6 +284,14 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
+st.sidebar.subheader("🔧 Manutenção de Modelos:")
+if st.sidebar.button("🔄 Atualizar/Corrigir Modelos no Supabase"):
+    qtd = recalcular_e_atualizar_modelos_supabase(df_base)
+    st.sidebar.success(f"✅ {qtd} modelos corrigidos e atualizados no Supabase!")
+    st.rerun()
+
+st.sidebar.markdown("---")
+
 empresas = ["Todas"] + list(df_base["Cliente"].unique()) if "Cliente" in df_base.columns and not df_base.empty else ["Todas"]
 f_empresa = st.sidebar.selectbox("Empresa / Cliente:", empresas)
 
@@ -289,13 +326,13 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DE VISUALIZAÇÃO
+# MÓDULOS DO PORTAL
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo de Análises de Óleo")
     
     if df_filtrado.empty:
-        st.info("💡 Nenhuma análise encontrada na base. Acesse **'📥 Importar Novos Laudos (PDF)'** para realizar o upload.")
+        st.info("💡 Nenhuma análise encontrada. Acesse o módulo **'📥 Importar Novos Laudos (PDF)'**.")
     else:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total de Amostras", len(df_filtrado))
@@ -314,27 +351,22 @@ if opcao_menu == "📊 Dashboard Geral":
                 fig_comp.update_traces(textinfo='percent+label')
                 st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.subheader("Base de Dados (Clique no Nº de Controle para abrir o laudo PDF)")
+        st.subheader("Base de Dados Carregada do Supabase")
         st.dataframe(
             df_filtrado,
             column_config={
-                "Link PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF"),
-                "Nº Controle Lab": st.column_config.LinkColumn("Nº Controle Lab", display_text="🔍 Ver Amostra")
+                "Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF do Laudo")
             },
             use_container_width=True
         )
 
-# ==============================================================================
-# MÓDULO DE SÉRIES TEMPORAIS E VARIAÇÃO %
-# ==============================================================================
 elif opcao_menu == "📈 Séries Temporais & Variação (%)":
-    st.title("📈 Monitoramento Temporal e Variação Percentual (%) vs. Leitura Anterior")
+    st.title("📈 Monitoramento Temporal e Variação Percentual (%)")
     if not df_filtrado.empty and "Data da Coleta" in df_filtrado.columns:
         df_temp = df_filtrado.sort_values(by=["Frota", "Compartimento", "Data da Coleta"]).copy()
         
         param_var = st.selectbox("Selecione o Elemento para Calcular a Variação (%):", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
         
-        # Cálculo de Variação % em relação à coleta anterior da mesma frota e compartimento
         df_temp[f"{param_var}_Anterior"] = df_temp.groupby(["Frota", "Compartimento"])[param_var].shift(1)
         df_temp["Variação (%)"] = np.where(
             df_temp[f"{param_var}_Anterior"] > 0,
@@ -342,12 +374,13 @@ elif opcao_menu == "📈 Séries Temporais & Variação (%)":
             0
         )
 
-        fig_var = px.line(df_temp, x="Data da Coleta", y="Variação (%)", color="Frota", markers=True, title=f"Variação Percentual (%) de {param_var} em Relação à Amostra Anterior")
+        fig_var = px.line(df_temp, x="Data da Coleta", y="Variação (%)", color="Frota", markers=True, title=f"Variação Percentual (%) de {param_var}")
         fig_var.add_hline(y=0, line_dash="dash", line_color="black")
         st.plotly_chart(fig_var, use_container_width=True)
 
         st.dataframe(
-            df_temp[["Data da Coleta", "Frota", "Modelo", "Compartimento", param_var, f"{param_var}_Anterior", "Variação (%)", "Status"]],
+            df_temp[["Data da Coleta", "Frota", "Modelo", "Compartimento", param_var, f"{param_var}_Anterior", "Variação (%)", "Status", "Link Laudo PDF"]],
+            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF")},
             use_container_width=True
         )
 
@@ -364,13 +397,9 @@ elif opcao_menu == "🚨 Ranking de Bad Actors":
             st.plotly_chart(fig_bad, use_container_width=True)
             st.dataframe(bad_actors, use_container_width=True)
 
-# ==============================================================================
-# MÓDULO ESTATÍSTICO APENAS COM A LEITURA MAIS RECENTE
-# ==============================================================================
 elif opcao_menu == "🔬 Distribuição Estatística Recente":
-    st.title("🔬 Distribuição Estatística (Baseada Apenas na ÚLTIMA Coleta Recente)")
+    st.title("🔬 Distribuição Estatística (Apenas ÚLTIMA Coleta Recente)")
     if not df_base.empty and "Data da Coleta" in df_base.columns:
-        # Filtra estritamente a última coleta de cada frota e compartimento
         df_ord = df_base.sort_values(by="Data da Coleta")
         df_recente = df_ord.groupby(["Frota", "Compartimento"]).last().reset_index()
 
@@ -382,7 +411,6 @@ elif opcao_menu == "🔬 Distribuição Estatística Recente":
         frotas_comp = list(df_comp_total["Frota"].unique()) if "Frota" in df_comp_total.columns else []
         if frotas_comp:
             frota_sel = st.selectbox("Selecione a Frota Específica para Comparar:", frotas_comp)
-            
             df_frota_especifica = df_comp_total[df_comp_total["Frota"] == frota_sel]
 
             if not df_comp_total.empty and param in df_comp_total.columns:
@@ -391,14 +419,14 @@ elif opcao_menu == "🔬 Distribuição Estatística Recente":
 
                 st.markdown("---")
                 k1, k2 = st.columns(2)
-                k1.metric(f"Média Recente {param} (Compartimento: {comp_sel})", f"{m_global:.1f} ppm")
-                k2.metric(f"Última Leitura {param} (Frota {frota_sel})", f"{m_frota:.1f} ppm", delta=f"{m_frota - m_global:.1f} ppm vs Média Global")
+                k1.metric(f"Média Recente {param} ({comp_sel})", f"{m_global:.1f} ppm")
+                k2.metric(f"Última Leitura {param} (Frota {frota_sel})", f"{m_frota:.1f} ppm", delta=f"{m_frota - m_global:.1f} ppm vs Global")
 
                 df_comp_total["Grupo_Comparacao"] = np.where(df_comp_total["Frota"] == frota_sel, f"Frota {frota_sel}", "Outras Frotas (Última Coleta)")
 
                 fig_limpo = px.histogram(
                     df_comp_total, x=param, color="Grupo_Comparacao", barmode="overlay",
-                    title=f"Distribuição de {param} (Apenas Últimas Amostras): Frota {frota_sel} vs. Média do Compartimento {comp_sel}",
+                    title=f"Distribuição de {param} (Últimas Amostras): Frota {frota_sel} vs. Compartimento {comp_sel}",
                     text_auto=True, opacity=0.75
                 )
                 fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black", annotation_text=f"Média Recente: {m_global:.1f}")
@@ -422,9 +450,6 @@ elif opcao_menu == "📉 Curva de Sobrevivência Interativa":
             fig_w.update_layout(hovermode="x unified")
             st.plotly_chart(fig_w, use_container_width=True)
 
-# ==============================================================================
-# MÓDULO RCA E REPROGRAMAÇÃO DO 5W2H
-# ==============================================================================
 elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
     st.title("🔍 RCA & Gestão de Ações 5W2H")
     
@@ -432,7 +457,11 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
     
     with tab1:
         st.subheader("1. Criar Plano de Ação a partir do Diagnóstico")
-        st.dataframe(df_filtrado, use_container_width=True)
+        st.dataframe(
+            df_filtrado,
+            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF")},
+            use_container_width=True
+        )
         st.markdown("---")
         if not df_filtrado.empty and "Nº Controle Lab" in df_filtrado.columns:
             amostras_opcoes = df_filtrado["Nº Controle Lab"].tolist()
@@ -475,16 +504,12 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
             linha_plano = df_5w2h[df_5w2h["Nº Controle Lab"] == plano_sel_id].iloc[0]
             
             c_s1, c_s2 = st.columns(2)
-            novo_status_exec = c_s1.selectbox(
-                "Status da Ação:", 
-                ["Em Andamento", "Concluído", "Atrasado", "Reprogramado"]
-            )
+            novo_status_exec = c_s1.selectbox("Status da Ação:", ["Em Andamento", "Concluído", "Atrasado", "Reprogramado"])
             motivo_justificativa = c_s2.text_input("Motivo da Alteração / Observação:")
             
-            # Libera o campo de data se o status for Atrasado ou Reprogramado
             novo_prazo_str = None
             if novo_status_exec in ["Atrasado", "Reprogramado"]:
-                st.warning("⚠️ Permissão de Reprogramação Ativa: Selecione a Nova Data Limite abaixo.")
+                st.warning("⚠️ Reprogramação Ativa: Selecione a Nova Data Limite abaixo.")
                 novo_prazo_dt = st.date_input("Nova Data / Prazo Limite (When):")
                 novo_prazo_str = novo_prazo_dt.strftime("%d/%m/%Y")
             
@@ -495,7 +520,8 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
                 
                 sucesso_up = atualizar_5w2h_status_prazo(plano_sel_id, novo_status_exec, novo_prazo_str, novo_hist)
                 if sucesso_up:
-                    st.success(f"✅ Plano {plano_sel_id} reprogramado com sucesso!")
+                    st.success(f"✅ Plano {plano_sel_id} reprogramado com sucesso no Supabase!")
+                    st.rerun()
         
         st.markdown("---")
         st.subheader("Histórico de Planos 5W2H Cadastrados")
