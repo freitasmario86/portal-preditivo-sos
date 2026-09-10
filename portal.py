@@ -18,8 +18,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# Conexão com a Planilha do Google Sheets para Persistência
+# Links para Acesso Direto às Bases
 URL_PLANILHA = "https://docs.google.com/spreadsheets/d/1hnntl9LfTqvPabewBU3PnNuZezREWi-3A5lmUM9GEwY/edit"
+URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
+
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
@@ -36,14 +38,13 @@ def carregar_dados_planilha():
     except Exception:
         return pd.DataFrame()
 
-# Carrega os dados persistidos na planilha do Google Sheets
 if "df_base" not in st.session_state:
     st.session_state.df_base = carregar_dados_planilha()
 
 df_base = st.session_state.df_base
 
 # ==============================================================================
-# PARSER FIDEDIGNO DO LAUDO SOTREQ / CATERPILLAR
+# PARSER CORRIGIDO - EXTRAÇÃO PRECISA DE MODELO, FROTA E ELEMENTOS
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -51,25 +52,29 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # 1. MODELO REAL DO EQUIPAMENTO (Captura do Cabeçalho: MODELO: SY215LR)
-    modelo_match = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
-    if not modelo_match:
-        # Fallback pelo nome do arquivo
+    # 1. MODELO REAL DO EQUIPAMENTO (Ex: MODELO: SY215LR)
+    modelo_m = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+    if not modelo_m:
+        # Padrão Sotreq com quebra de linha: MODELO:\nSY215LR
+        modelo_m = re.search(r'MODELO\s*[:\n\s]+([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+    
+    if not modelo_m or modelo_m.group(1).upper() in ["DO", "DE", "DA", "SANY"]:
         modelo_m = re.search(r'_([A-Z0-9]+)#', filename)
         modelo = modelo_m.group(1) if modelo_m else "Geral"
     else:
-        modelo = modelo_match.group(1).strip()
+        modelo = modelo_m.group(1).strip()
 
-    # 2. FROTA E Nº DE CONTROLE
-    frota_m = re.search(r'NÚMERO DE FROTA\s*:\s*\n?\s*([A-Z0-9]+)', texto, re.IGNORECASE)
+    # 2. NÚMERO DE FROTA (Ex: NÚMERO DE FROTA: ES0181)
+    frota_m = re.search(r'NÚMERO DE FROTA\s*[:\n\s]+([A-Z0-9]+)', texto, re.IGNORECASE)
     if not frota_m:
         frota_m = re.search(r'#([A-Z0-9]+)_', filename)
     frota = frota_m.group(1).strip() if frota_m else "Desconhecido"
 
+    # 3. Nº DE CONTROLE
     ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
     controle = ctrl_m.group(0) if ctrl_m else "Desconhecido"
 
-    # 3. COMPARTIMENTO E STATUS
+    # 4. COMPARTIMENTO E STATUS
     mapa_comp = {
         'FD_LT': 'COMANDO F ESQ', 'FD_RT': 'COMANDO F DIR', 'SW_DR': 'COMANDO GIRO',
         'ENG': 'MOTOR', 'HS': 'SISTEMA HIDRAULICO', 'DIFF_FR': 'DIFERENCIAL DIANT',
@@ -87,7 +92,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     elif "_MC.PDF" in filename.upper() or "MONITORAR" in texto.upper():
         status = "Monitorar"
 
-    # 4. DATA E HORÍMETROS
+    # 5. DATA E HORÍMETROS
     data_match = re.search(r'DATA COLETA\s*\n?\s*(\d{2}-[A-Za-z]{3}-\d{4})', texto, re.IGNORECASE)
     if not data_match:
         data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
@@ -99,8 +104,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     hr_equip = float(hr_equip_m.group(1).replace(',', '.')) if hr_equip_m else 0.0
     hr_oleo = float(hr_oleo_m.group(1).replace(',', '.')) if hr_oleo_m else 0.0
 
-    # 5. EXTRAÇÃO POSICIONAL DAS TABELAS DE ELEMENTOS DE DESGASTE (PPM) E CONDIÇÕES DO ÓLEO
-    # Localiza a linha correspondente ao Nº de Controle Atual
+    # 6. EXTRAÇÃO POSICIONAL DOS ELEMENTOS QUÍMICOS (PPM)
     elementos = {
         "Cu": 0.0, "Fe": 0.0, "Cr": 0.0, "Al": 0.0, "Pb": 0.0, "Sn": 0.0, "Si": 0.0,
         "Na": 0.0, "K": 0.0, "B": 0.0, "Mo": 0.0, "Ni": 0.0, "Ag": 0.0, "Ti": 0.0,
@@ -108,27 +112,26 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         "V100": 0.0, "H2O": 0.0
     }
 
-    # Procura a linha que começa com o Nº de Controle do Lab
     linhas = texto.split('\n')
     for i, linha in enumerate(linhas):
         if controle != "Desconhecido" and controle in linha:
-            # Captura a sequência de valores numéricos na mesma linha ou na linha imediatamente abaixo
-            bloco_texto = " ".join(linhas[i:i+3])
+            bloco_texto = " ".join(linhas[i:i+4])
             valores_num = re.findall(r'\b\d+[\.,]?\d*\b', bloco_texto)
             
-            # Se a linha contiver os 21 elementos de desgaste listados na tabela Sotreq
             if len(valores_num) >= 21:
                 keys_elem = ["Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "Mo", "Ni", "Ag", "Ti", "V", "Mn", "Ca", "Mg", "Zn", "P", "Ba"]
                 for idx, k in enumerate(keys_elem):
                     elementos[k] = float(valores_num[idx].replace(',', '.'))
 
-        # Captura de Viscosidade e Água
         if "V100" in linha or "H2O" in linha or "Condições do óleo" in linha:
             bloco_cond = " ".join(linhas[i:i+4])
             match_v100 = re.search(r'(\d{2}\.\d{2})', bloco_cond)
             match_h2o = re.search(r'(\d\.\d{2,4})', bloco_cond)
             if match_v100: elementos["V100"] = float(match_v100.group(1))
             if match_h2o: elementos["H2O"] = float(match_h2o.group(1))
+
+    # Link do Laudo no Google Drive
+    link_laudo = f"https://drive.google.com/drive/u/0/folders/{URL_PASTA_DRIVE.split('/')[-1]}"
 
     dados_finais = {
         "Data da Coleta": data_coleta,
@@ -140,15 +143,22 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         "Horímetro Equip": hr_equip,
         "Horímetro Óleo": hr_oleo,
         "Nº Controle Lab": controle,
+        "Link Laudo": link_laudo,
         "Nome do Arquivo PDF": filename
     }
     dados_finais.update(elementos)
     return dados_finais
 
 # ==============================================================================
-# FILTROS LATERAIS
+# FILTROS LATERAIS E LINKS DE ACESSO
 # ==============================================================================
-st.sidebar.title("🛠️ Filtros do Portal")
+st.sidebar.title("🛠️ Painel de Controle")
+
+# Exibição de Links Úteis na Barra Lateral
+st.sidebar.subheader("🔗 Links de Acesso Rápido")
+st.sidebar.markdown(f"[📊 Planilha do Google Sheets]({URL_PLANILHA})")
+st.sidebar.markdown(f"[📁 Pasta do Google Drive (PDFs)]({URL_PASTA_DRIVE})")
+st.sidebar.markdown("---")
 
 empresas = ["Todas"] + list(df_base["Cliente"].unique()) if "Cliente" in df_base.columns and not df_base.empty else ["Todas"]
 f_empresa = st.sidebar.selectbox("Empresa / Cliente:", empresas)
@@ -185,10 +195,13 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DE VISUALIZAÇÃO
+# MÓDULOS DE VISUALIZAÇÃO COM COLUNA DE LINK CLICÁVEL
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo e Preventivo")
+    
+    st.info(f"👉 **Planilha de Registros:** [Acessar Google Sheets]({URL_PLANILHA}) | 👉 **Pasta de Laudos:** [Acessar Google Drive]({URL_PASTA_DRIVE})")
+    
     if not df_filtrado.empty:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total de Amostras", len(df_filtrado))
@@ -209,7 +222,14 @@ if opcao_menu == "📊 Dashboard Geral":
             fig_comp.update_traces(textinfo='percent+label')
             st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.dataframe(df_filtrado, use_container_width=True)
+        if "Link Laudo" not in df_filtrado.columns:
+            df_filtrado["Link Laudo"] = URL_PASTA_DRIVE
+
+        st.dataframe(
+            df_filtrado,
+            column_config={"Link Laudo": st.column_config.LinkColumn("Abrir Laudo", display_text="📁 Ver PDF")},
+            use_container_width=True
+        )
 
 elif opcao_menu == "🧪 Elementos de Desgaste & Condição":
     st.title("🧪 Monitoramento de Elementos Químicos & Condição do Óleo")
@@ -222,7 +242,10 @@ elif opcao_menu == "🧪 Elementos de Desgaste & Condição":
         )
         st.plotly_chart(fig_elem, use_container_width=True)
 
-        st.dataframe(df_filtrado[["Frota", "Modelo", "Compartimento", "Horímetro Óleo", "Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "Status"]], use_container_width=True)
+        st.dataframe(
+            df_filtrado[["Frota", "Modelo", "Compartimento", "Horímetro Óleo", "Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "Status"]],
+            use_container_width=True
+        )
 
 elif opcao_menu == "🚨 Pior Ativo (Bad Actors) & MTBF":
     st.title("🚨 Ranking de Piores Ativos (Bad Actors) & Confiabilidade")
@@ -295,7 +318,7 @@ elif opcao_menu == "🔍 Causa Raiz (RCA)":
 # ==============================================================================
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
     st.title("📥 Importação e Extração Fidedigna de PDFs")
-    st.markdown("Arraste apenas os **novos laudos** em PDF. Os dados serão lidos com 100% de precisão e salvos na planilha do Google Sheets.")
+    st.markdown("Arraste apenas os **novos laudos** em PDF. O leitor irá extrair o Modelo do Equipamento real, o Nº de Frota, a tabela completa de elementos químicos e salvar diretamente na planilha do Google Sheets.")
 
     uploaded_files = st.file_uploader("Upload de Laudos em PDF", type=["pdf"], accept_multiple_files=True)
     
@@ -311,17 +334,15 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
 
             df_novos = pd.DataFrame(novos_registros)
             
-            # Mescla com os dados antigos e remove duplicados pelo Nome do PDF / Nº de Controle
             df_consolidado = pd.concat([st.session_state.df_base, df_novos], ignore_index=True)
             df_consolidado = df_consolidado.drop_duplicates(subset=["Nº Controle Lab"], keep="last")
 
-            # Atualiza o estado local e persiste no Google Sheets
             st.session_state.df_base = df_consolidado
             
             try:
                 conn.update(spreadsheet=URL_PLANILHA, data=df_consolidado)
-                st.success("✅ Novos laudos processados e salvos com sucesso no Google Sheets!")
+                st.success("✅ Novos laudos salvos e persistidos na planilha do Google Sheets!")
             except Exception:
-                st.success("✅ Novos laudos integrados à sessão atual do portal!")
+                st.success("✅ Novos laudos carregados no portal para esta sessão!")
 
             st.dataframe(df_novos, use_container_width=True)
