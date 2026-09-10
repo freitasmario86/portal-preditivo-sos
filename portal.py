@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 import pypdf
 import re
-import gdown
+import requests
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import plotly.express as px
 import plotly.graph_objects as go
@@ -19,7 +20,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ID da pasta do Google Drive fornecida
+# Configurações do Google Drive e Planilha
 FOLDER_ID_DRIVE = "19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
 URL_PLANILHA = "https://docs.google.com/spreadsheets/d/1hnntl9LfTqvPabewBU3PnNuZezREWi-3A5lmUM9GEwY/edit"
 
@@ -31,7 +32,7 @@ def carregar_dados():
         df = conn.read(spreadsheet=URL_PLANILHA)
         df = df.dropna(how="all")
         
-        # Garantia de conversão numérica para evitar erros de cálculo
+        # Conversão numérica com segurança
         cols_num = ["Horímetro Equip", "Horímetro Óleo", "Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "V100", "H2O"]
         for col in cols_num:
             if col in df.columns:
@@ -46,7 +47,7 @@ if "df_base" not in st.session_state:
 df_base = st.session_state.df_base
 
 # ==============================================================================
-# EXTRAÇÃO COMPLETA DE DADOS DO PDF
+# EXTRAÇÃO DE DADOS DO PDF DA SOTREQ / CATERPILLAR
 # ==============================================================================
 def extrair_dados_pdf(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -54,7 +55,7 @@ def extrair_dados_pdf(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # Extração de Metadados via Nome do Arquivo
+    # Extração via Nome do Arquivo
     modelo_m = re.search(r'_([A-Z0-9]+)#', filename)
     frota_m = re.search(r'#([A-Z0-9]+)_', filename)
     ctrl_m = re.search(r'_(U\d{3}-\d{5}-\d{4})', filename)
@@ -88,7 +89,7 @@ def extrair_dados_pdf(file_bytes, filename):
     hr_equip = float(hrs_encontrados[0].replace(',', '.')) if len(hrs_encontrados) >= 1 else 0.0
     hr_oleo = float(hrs_encontrados[1].replace(',', '.')) if len(hrs_encontrados) >= 2 else 0.0
 
-    # Função Auxiliar para Extração de Valores Químicos (ppm) e Propriedades
+    # Extração de Elementos Químicos e Propriedades
     def extrair_valor_campo(padrao, text):
         m = re.search(padrao, text)
         return float(m.group(1).replace(',', '.')) if m else 0.0
@@ -116,30 +117,45 @@ def extrair_dados_pdf(file_bytes, filename):
     }
 
 # ==============================================================================
-# CONEXÃO DIRETA COM A PASTA DO GOOGLE DRIVE (VIA GDOWN)
+# SINCRONIZAÇÃO PARALELA ULTRA-RÁPIDA COM GOOGLE DRIVE
 # ==============================================================================
-def buscar_pdfs_da_pasta_drive_publica(folder_id):
+def baixar_e_extrair_single_pdf(file_info):
+    file_id, filename = file_info
+    url_direct = f"https://drive.google.com/uc?export=download&id={file_id}"
     try:
-        url_folder = f"https://drive.google.com/drive/folders/{folder_id}"
-        files = gdown.download_folder(url_folder, quiet=True, use_cookies=False)
+        response = requests.get(url_direct, timeout=10)
+        if response.status_code == 200:
+            file_bytes = BytesIO(response.content)
+            return extrair_dados_pdf(file_bytes, filename)
+    except Exception:
+        pass
+    return None
+
+def buscar_pdfs_da_pasta_drive_rapido(folder_id):
+    try:
+        url_folder = f"https://drive.google.com/embeddedfolderview?id={folder_id}#list"
+        response = requests.get(url_folder, timeout=10)
         
+        matches = re.findall(r'href="https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)/view\?usp=drivesdk"[^>]*>([^<]+)</a>', response.text)
+        lista_arquivos = [(f_id, name) for f_id, name in matches if name.lower().endswith('.pdf')]
+        
+        if not lista_arquivos:
+            return pd.DataFrame()
+
         dados_extraidos = []
-        if files:
-            for file_path in files:
-                if file_path.lower().endswith('.pdf'):
-                    with open(file_path, 'rb') as f:
-                        file_bytes = BytesIO(f.read())
-                        filename = file_path.replace("\\", "/").split("/")[-1]
-                        dados = extrair_dados_pdf(file_bytes, filename)
-                        dados_extraidos.append(dados)
-        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            resultados = executor.map(baixar_e_extrair_single_pdf, lista_arquivos)
+            for res in resultados:
+                if res:
+                    dados_extraidos.append(res)
+                    
         return pd.DataFrame(dados_extraidos)
     except Exception as e:
-        st.error(f"Erro ao ler pasta do Google Drive: {e}")
+        st.error(f"Erro na sincronização rápida: {e}")
         return pd.DataFrame()
 
 # ==============================================================================
-# FILTROS DINÂMICOS NO MENU LATERAL
+# FILTROS LATERAIS
 # ==============================================================================
 st.sidebar.title("🛠️ Filtros do Portal")
 
@@ -178,7 +194,7 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# 1. DASHBOARD GERAL
+# MÓDULOS DE ANÁLISE
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo e Preventivo")
@@ -204,20 +220,15 @@ if opcao_menu == "📊 Dashboard Geral":
 
         st.dataframe(df_filtrado, use_container_width=True)
 
-# ==============================================================================
-# 2. ELEMENTOS DE DESGASTE E CONDIÇÃO DO ÓLEO
-# ==============================================================================
 elif opcao_menu == "🧪 Elementos de Desgaste & Condição":
     st.title("🧪 Monitoramento de Elementos Químicos & Condição do Óleo")
     if not df_filtrado.empty:
         st.subheader("Análise de Contaminação e Desgaste Metalúrgico (ppm)")
-        
         fig_elem = px.bar(
             df_filtrado, x="Frota", y=["Fe", "Cu", "Si", "Al", "Cr"],
             title="Concentração de Metais de Desgaste por Frota (ppm)",
             barmode="group", text_auto=True
         )
-        fig_elem.update_layout(xaxis_title="Frota", yaxis_title="PPM", legend_title="Elemento")
         st.plotly_chart(fig_elem, use_container_width=True)
 
         st.subheader("Viscosidade (V100) vs. Contaminação por Água (H2O)")
@@ -230,16 +241,12 @@ elif opcao_menu == "🧪 Elementos de Desgaste & Condição":
 
         st.dataframe(df_filtrado[["Frota", "Compartimento", "Horímetro Óleo", "Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "Status"]], use_container_width=True)
 
-# ==============================================================================
-# 3. BAD ACTORS & MTBF
-# ==============================================================================
 elif opcao_menu == "🚨 Pior Ativo (Bad Actors) & MTBF":
     st.title("🚨 Ranking de Piores Ativos (Bad Actors) & Confiabilidade")
     if not df_filtrado.empty:
         criticos = df_filtrado[df_filtrado["Status"].isin(["Crítico", "Monitorar"])]
         if not criticos.empty:
             bad_actors = criticos.groupby(["Frota", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
-            
             fig_bad = px.bar(
                 bad_actors, x="Frota", y="Ocorrências Críticas", color="Compartimento",
                 title="Gráfico de Pareto: Reincidência de Falhas por Ativo", text_auto=True
@@ -247,9 +254,6 @@ elif opcao_menu == "🚨 Pior Ativo (Bad Actors) & MTBF":
             st.plotly_chart(fig_bad, use_container_width=True)
             st.dataframe(bad_actors, use_container_width=True)
 
-# ==============================================================================
-# 4. TENDÊNCIA E DELTA DE HORÍMETRO
-# ==============================================================================
 elif opcao_menu == "📈 Tendência & Intervalo de Amostragem":
     st.title("📈 Análise de Tendência e Delta de Horímetro")
     if not df_filtrado.empty:
@@ -265,9 +269,6 @@ elif opcao_menu == "📈 Tendência & Intervalo de Amostragem":
 
         st.dataframe(df_ord[["Data da Coleta", "Frota", "Compartimento", "Horímetro Equip", "Intervalo Amostra (Δ Horímetro)", "Horímetro Óleo", "Status"]], use_container_width=True)
 
-# ==============================================================================
-# 5. DISTRIBUIÇÃO ESTATÍSTICA (SIGMAS)
-# ==============================================================================
 elif opcao_menu == "🔬 Distribuição Estatística (Sigma)":
     st.title("🔬 Análise Estatística (Distribuição Normal e Sigmas)")
     if not df_filtrado.empty:
@@ -300,9 +301,6 @@ elif opcao_menu == "🔬 Distribuição Estatística (Sigma)":
         df_e["Classificação Estatística"] = df_e["Horímetro Óleo"].apply(enquadrar_sigma)
         st.dataframe(df_e[["Frota", "Compartimento", "Horímetro Óleo", "Classificação Estatística", "Status"]], use_container_width=True)
 
-# ==============================================================================
-# 6. WEIBULL (CORRIGIDO SEM ERRO DE DATA TYPES)
-# ==============================================================================
 elif opcao_menu == "📉 Sobrevivência (Weibull & Risco)":
     st.title("📉 Curva de Sobrevivência (Weibull) & Análise de Risco")
     if not df_filtrado.empty:
@@ -331,12 +329,7 @@ elif opcao_menu == "📉 Sobrevivência (Weibull & Risco)":
             )
             fig_w.update_traces(textposition="top center")
             st.plotly_chart(fig_w, use_container_width=True)
-        else:
-            st.warning("É necessário ter pelo menos 3 amostras com horímetro maior que zero para gerar a curva de Weibull.")
 
-# ==============================================================================
-# 7. CAUSA RAIZ (RCA)
-# ==============================================================================
 elif opcao_menu == "🔍 Causa Raiz (RCA)":
     st.title("🔍 Análise de Causa Raiz (RCA) - Matriz de Diagnóstico")
     rca_matrix = pd.DataFrame([
@@ -346,18 +339,15 @@ elif opcao_menu == "🔍 Causa Raiz (RCA)":
     ])
     st.table(rca_matrix)
 
-# ==============================================================================
-# 8. IMPORTAÇÃO E SINCRONIZAÇÃO AUTOMÁTICA
-# ==============================================================================
 elif opcao_menu == "📥 Importar Laudos (Drive & PDF)":
-    st.title("📥 Sincronização e Processamento de PDFs")
+    st.title("📥 Sincronização Automática Ultra-Rápida")
 
-    st.subheader("1. Conexão Direta com a Pasta do Google Drive")
-    st.markdown(f"**Pasta Ativa:** `https://drive.google.com/drive/u/0/folders/{FOLDER_ID_DRIVE}`")
+    st.subheader("1. Conexão em Memória RAM com o Google Drive")
+    st.markdown(f"**ID da Pasta Conectada:** `{FOLDER_ID_DRIVE}`")
 
-    if st.button("🔄 SINCRONIZAR COM A PASTA DO GOOGLE DRIVE", type="primary"):
-        with st.spinner("Lendo arquivos PDF diretamente da pasta do Google Drive..."):
-            df_drive = buscar_pdfs_da_pasta_drive_publica(FOLDER_ID_DRIVE)
+    if st.button("⚡ SINCRONIZAR AGORA (MODO RÁPIDO)", type="primary"):
+        with st.spinner("Lendo PDFs simultaneamente em memória..."):
+            df_drive = buscar_pdfs_da_pasta_drive_rapido(FOLDER_ID_DRIVE)
 
             if not df_drive.empty:
                 st.session_state.df_base = pd.concat(
@@ -365,10 +355,10 @@ elif opcao_menu == "📥 Importar Laudos (Drive & PDF)":
                     ignore_index=True
                 ).drop_duplicates(subset=["Nome do Arquivo PDF"])
                 
-                st.success(f"✅ {len(df_drive)} laudo(s) lido(s) e integrados com sucesso!")
+                st.success(f"⚡ Sucesso! {len(df_drive)} laudo(s) lido(s) e integrados!")
                 st.dataframe(df_drive, use_container_width=True)
             else:
-                st.warning("Nenhum arquivo PDF encontrado na pasta do Drive.")
+                st.warning("Nenhum arquivo PDF encontrado na pasta.")
 
     st.markdown("---")
     st.subheader("2. Upload Manual Alternativo")
