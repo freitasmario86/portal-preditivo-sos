@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# Importações para a Geração do Relatório PDF Executivo
+# Importações do ReportLab para Emissão de Relatório em PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -33,13 +33,13 @@ def init_supabase() -> Client:
         key = st.secrets["supabase"]["SUPABASE_KEY"]
         return create_client(url, key)
     except Exception as e:
-        st.error(f"⚠️ Erro nas credenciais do Supabase: {e}")
+        st.error(f"⚠️ Erro ao conectar com Supabase: {e}")
         return None
 
 supabase = init_supabase()
 
 # ==============================================================================
-# CARREGAMENTO E PERSISTÊNCIA DE DADOS
+# CARREGAMENTO E MAPPING DE DADOS
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -65,9 +65,9 @@ def carregar_dados_base():
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            # Gera o Link Direto de Pesquisa e Visualização do Arquivo PDF no Drive
+            # Link Direto para Abrir o PDF Específico da Amostra
             df["Link Laudo PDF"] = df["Nome do Arquivo PDF"].apply(
-                lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and x != "" else URL_PASTA_DRIVE
+                lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and str(x).strip() != "" else URL_PASTA_DRIVE
             )
         return df
     except Exception as e:
@@ -116,37 +116,8 @@ def salvar_laudos_supabase(df_novos):
         st.cache_data.clear()
         return True
     except Exception as e:
-        st.error(f"Erro ao gravar no Supabase: {e}")
+        st.error(f"Erro ao salvar no Supabase: {e}")
         return False
-
-def recalcular_e_atualizar_modelos_supabase(df_atual):
-    """
-    Função de engenharia para atualizar os modelos gravados incorretamente no Supabase
-    """
-    if not supabase or df_atual.empty: return False
-    try:
-        corrigidos = 0
-        for _, r in df_atual.iterrows():
-            filename = str(r.get("Nome do Arquivo PDF", ""))
-            ctrl = str(r.get("Nº Controle Lab", ""))
-            
-            # Aplica extração rigorosa de modelo no nome do arquivo
-            mod_match = re.search(r'6612254_([A-Z0-9]+)#', filename)
-            if not mod_match:
-                mod_match = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|KT[0-9A-Z]+|J[0-9A-Z]+|D[0-9A-Z]+)', filename.upper())
-            
-            modelo_correto = mod_match.group(1).strip() if mod_match else str(r.get("Modelo", "Geral"))
-            
-            # Se o modelo atual for inválido, atualiza no Supabase
-            if r.get("Modelo") in ["N", "LOCAL", "Geral", "Desconhecido"] or r.get("Modelo") != modelo_correto:
-                supabase.table("laudos_sos").update({"modelo": modelo_correto}).eq("controle_lab", ctrl).execute()
-                corrigidos += 1
-        
-        st.cache_data.clear()
-        return corrigidos
-    except Exception as e:
-        st.error(f"Erro ao recalcular modelos: {e}")
-        return 0
 
 def salvar_5w2h_supabase(df_5w2h):
     if not supabase or df_5w2h.empty: return False
@@ -185,7 +156,7 @@ df_base = carregar_dados_base()
 df_5w2h = carregar_plano_5w2h()
 
 # ==============================================================================
-# EXTRAÇÃO E REGEX DO MODELO REAL
+# PARSER COMPLETO: CORREÇÃO DE MODELO E AMOSTRAS NORMAIS
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -193,16 +164,17 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # Extração primária do modelo no nome do arquivo Sotreq
-    mod_match = re.search(r'6612254_([A-Z0-9]+)#', filename)
-    if not mod_match:
-        mod_match = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|KT[0-9A-Z]+|J[0-9A-Z]+|D[0-9A-Z]+)', filename.upper())
-    
-    if mod_match:
-        modelo = mod_match.group(1).strip()
+    # Regex para capturar Modelos Comerciais Reais (SY215LR, SKT110S, SKT130, Cat 336, etc)
+    mod_comercial = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|3[0-9]{2}[A-Z]?|CAT[0-9A-Z]+|777[A-Z]?|D[8-9][R-T]?)', filename.upper())
+    if mod_comercial:
+        modelo = mod_comercial.group(1).strip()
     else:
+        # Busca no texto descartando códigos de série como D68808 ou CX0308
         mod_txt = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
-        modelo = mod_txt.group(1).strip() if mod_txt and mod_txt.group(1).upper() not in ["N", "LOCAL", "DO"] else "Geral"
+        if mod_txt and not re.match(r'^(D|CX|E|CBL)[0-9]{4,}', mod_txt.group(1).strip()):
+            modelo = mod_txt.group(1).strip()
+        else:
+            modelo = "Geral"
 
     frota_file = re.search(r'#([A-Z0-9]+)_', filename)
     frota = frota_file.group(1) if frota_file else "Desconhecido"
@@ -221,11 +193,15 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
             compartimento = v
             break
 
-    status = "Normal"
-    if "_AR.PDF" in filename.upper() or "CRÍTICO" in texto.upper():
+    # Leitura Fidedigna de Status (Inclusão Completa de "Normal")
+    texto_upper = texto.upper()
+    filename_upper = filename.upper()
+    if "_AR.PDF" in filename_upper or "CRÍTICO" in texto_upper or "CRITICO" in texto_upper:
         status = "Crítico"
-    elif "_MC.PDF" in filename.upper() or "MONITORAR" in texto.upper():
+    elif "_MC.PDF" in filename_upper or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper:
         status = "Monitorar"
+    else:
+        status = "Normal"  # Garante que laudos normais sejam capturados
 
     data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
     data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d/%m/%Y")
@@ -280,15 +256,94 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# MENU LATERAL E FILTROS
+# RELATÓRIO PDF EXECUTIVO GERADO PELO PORTAL
+# ==============================================================================
+def gerar_relatorio_pdf_executivo(df_dados, df_planos):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    story = []
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor("#0F172A"), spaceAfter=10)
+    subtitle_style = ParagraphStyle('SubtitleStyle', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor("#1E3A8A"), spaceAfter=6)
+    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8, leading=10)
+
+    story.append(Paragraph("<b>RELATÓRIO DE ENGENHARIA DE CONFIABILIDADE S•O•S</b>", title_style))
+    story.append(Paragraph(f"Data de Emissão: {datetime.now().strftime('%d/%m/%Y %H:%M')} | Cliente: 3 SKAVAMINAS", body_style))
+    story.append(Spacer(1, 10))
+
+    total = len(df_dados)
+    criticos = len(df_dados[df_dados["Status"] == "Crítico"]) if not df_dados.empty and "Status" in df_dados.columns else 0
+    monit = len(df_dados[df_dados["Status"] == "Monitorar"]) if not df_dados.empty and "Status" in df_dados.columns else 0
+    normais = len(df_dados[df_dados["Status"] == "Normal"]) if not df_dados.empty and "Status" in df_dados.columns else 0
+
+    story.append(Paragraph("<b>1. Resumo Executivo da Frota (KPIs)</b>", subtitle_style))
+    kpi_table = Table([
+        ["Total Amostras", "Críticos (Ação Imediata)", "Em Monitoramento", "Normais"],
+        [str(total), str(criticos), str(monit), str(normais)]
+    ], colWidths=[130, 140, 130, 130])
+    kpi_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E40AF")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#94A3B8"))
+    ]))
+    story.append(kpi_table)
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("<b>2. Ranking de Bad Actors</b>", subtitle_style))
+    if not df_dados.empty and "Status" in df_dados.columns:
+        df_c = df_dados[df_dados["Status"].isin(["Crítico", "Monitorar"])]
+        if not df_c.empty:
+            bad = df_c.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Falhas").sort_values(by="Falhas", ascending=False).head(6)
+            bad_data = [["Frota", "Modelo", "Compartimento", "Ocorrências Críticas"]]
+            for _, r in bad.iterrows():
+                bad_data.append([str(r["Frota"]), str(r["Modelo"]), str(r["Compartimento"]), str(r["Falhas"])])
+            t_bad = Table(bad_data, colWidths=[100, 120, 210, 100])
+            t_bad.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#991B1B")),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER')
+            ]))
+            story.append(t_bad)
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("<b>3. Ações 5W2H Cadastradas</b>", subtitle_style))
+    if not df_planos.empty:
+        p_data = [["Frota", "O Que Fazer (What)", "Responsável", "Prazo", "Status"]]
+        for _, r in df_planos.head(6).iterrows():
+            p_data.append([
+                str(r.get("Frota", "")), str(r.get("O Que (What)", ""))[:35],
+                str(r.get("Quem / Responsável (Who)", "")), str(r.get("Quando / Prazo (When)", "")),
+                str(r.get("Status Execução", ""))
+            ])
+        t_p = Table(p_data, colWidths=[60, 200, 110, 70, 90])
+        t_p.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#15803D")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER')
+        ]))
+        story.append(t_p)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# ==============================================================================
+# PAINEL LATERAL E FILTROS
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
-st.sidebar.subheader("🔧 Manutenção de Modelos:")
-if st.sidebar.button("🔄 Atualizar/Corrigir Modelos no Supabase"):
-    qtd = recalcular_e_atualizar_modelos_supabase(df_base)
-    st.sidebar.success(f"✅ {qtd} modelos corrigidos e atualizados no Supabase!")
-    st.rerun()
+st.sidebar.subheader("📄 Emissão de Relatório Executivo")
+pdf_bytes = gerar_relatorio_pdf_executivo(df_base, df_5w2h)
+st.sidebar.download_button(
+    label="📥 EMITIR RELATÓRIO PDF COMPLETO",
+    data=pdf_bytes,
+    file_name=f"Relatorio_Preditivo_SOS_{datetime.now().strftime('%d%m%Y')}.pdf",
+    mime="application/pdf"
+)
 
 st.sidebar.markdown("---")
 
@@ -316,8 +371,8 @@ opcao_menu = st.sidebar.radio(
     "Módulos do Portal:",
     [
         "📊 Dashboard Geral", 
-        "📈 Séries Temporais & Variação (%)",
-        "🚨 Ranking de Bad Actors", 
+        "📈 Séries Temporais & Variação Modelo",
+        "🚨 Ranking de Bad Actors Ordenado", 
         "🔬 Distribuição Estatística Recente", 
         "📉 Curva de Sobrevivência Interativa", 
         "🔍 RCA & Gestão do Plano 5W2H", 
@@ -326,13 +381,13 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DO PORTAL
+# MÓDULOS DE VISUALIZAÇÃO
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral":
     st.title("🚜 Dashboard Proativo de Análises de Óleo")
     
     if df_filtrado.empty:
-        st.info("💡 Nenhuma análise encontrada. Acesse o módulo **'📥 Importar Novos Laudos (PDF)'**.")
+        st.info("💡 Nenhuma análise encontrada na base. Acesse **'📥 Importar Novos Laudos (PDF)'**.")
     else:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total de Amostras", len(df_filtrado))
@@ -343,7 +398,12 @@ if opcao_menu == "📊 Dashboard Geral":
         col1, col2 = st.columns(2)
         with col1:
             if "Status" in df_filtrado.columns:
-                fig_status = px.bar(df_filtrado["Status"].value_counts().reset_index(), x='Status', y='count', title="Distribuição de Criticidade", text_auto=True, color='Status')
+                fig_status = px.bar(
+                    df_filtrado["Status"].value_counts().reset_index(), 
+                    x='Status', y='count', title="Distribuição de Criticidade", 
+                    text_auto=True, color='Status',
+                    color_discrete_map={"Normal": "#10B981", "Monitorar": "#F59E0B", "Crítico": "#EF4444"}
+                )
                 st.plotly_chart(fig_status, use_container_width=True)
         with col2:
             if "Compartimento" in df_filtrado.columns:
@@ -351,49 +411,71 @@ if opcao_menu == "📊 Dashboard Geral":
                 fig_comp.update_traces(textinfo='percent+label')
                 st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.subheader("Base de Dados Carregada do Supabase")
+        st.subheader("Base de Dados Completa (Clique no link para abrir o Laudo PDF)")
         st.dataframe(
             df_filtrado,
             column_config={
-                "Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF do Laudo")
+                "Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir Documento PDF")
             },
             use_container_width=True
         )
 
-elif opcao_menu == "📈 Séries Temporais & Variação (%)":
-    st.title("📈 Monitoramento Temporal e Variação Percentual (%)")
+# ==============================================================================
+# SÉRIES TEMPORAIS COM LINHA DE MODELO E FROTA
+# ==============================================================================
+elif opcao_menu == "📈 Séries Temporais & Variação Modelo":
+    st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
     if not df_filtrado.empty and "Data da Coleta" in df_filtrado.columns:
-        df_temp = df_filtrado.sort_values(by=["Frota", "Compartimento", "Data da Coleta"]).copy()
+        df_temp = df_filtrado.sort_values(by=["Modelo", "Frota", "Data da Coleta"]).copy()
         
-        param_var = st.selectbox("Selecione o Elemento para Calcular a Variação (%):", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
+        param_var = st.selectbox("Selecione o Parâmetro Químico:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
         
-        df_temp[f"{param_var}_Anterior"] = df_temp.groupby(["Frota", "Compartimento"])[param_var].shift(1)
-        df_temp["Variação (%)"] = np.where(
-            df_temp[f"{param_var}_Anterior"] > 0,
-            ((df_temp[param_var] - df_temp[f"{param_var}_Anterior"]) / df_temp[f"{param_var}_Anterior"]) * 100,
-            0
-        )
+        # Média histórica do modelo para o parâmetro selecionado
+        df_media_modelo = df_temp.groupby(["Modelo", "Data da Coleta"])[param_var].mean().reset_index()
+        df_media_modelo["Legenda"] = "Média do Modelo (" + df_media_modelo["Modelo"] + ")"
 
-        fig_var = px.line(df_temp, x="Data da Coleta", y="Variação (%)", color="Frota", markers=True, title=f"Variação Percentual (%) de {param_var}")
-        fig_var.add_hline(y=0, line_dash="dash", line_color="black")
-        st.plotly_chart(fig_var, use_container_width=True)
+        fig_temp = px.line(
+            df_temp, x="Data da Coleta", y=param_var, color="Frota", markers=True,
+            title=f"Evolução Temporal de {param_var}: Frota vs. Média do Modelo"
+        )
+        # Adiciona a linha de referência do modelo
+        for mod in df_temp["Modelo"].unique():
+            df_m = df_media_modelo[df_media_modelo["Modelo"] == mod]
+            fig_temp.add_trace(go.Scatter(
+                x=df_m["Data da Coleta"], y=df_m[param_var],
+                mode='lines', name=f'Média Modelo {mod}',
+                line=dict(dash='dash', width=3, color='black')
+            ))
+        
+        st.plotly_chart(fig_temp, use_container_width=True)
 
         st.dataframe(
-            df_temp[["Data da Coleta", "Frota", "Modelo", "Compartimento", param_var, f"{param_var}_Anterior", "Variação (%)", "Status", "Link Laudo PDF"]],
-            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF")},
+            df_temp[["Data da Coleta", "Frota", "Modelo", "Compartimento", param_var, "Status", "Link Laudo PDF"]],
+            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir Documento PDF")},
             use_container_width=True
         )
 
-elif opcao_menu == "🚨 Ranking de Bad Actors":
-    st.title("🚨 Ranking de Piores Ativos (Bad Actors)")
+# ==============================================================================
+# RANKING DE BAD ACTORS ORDENADO
+# ==============================================================================
+elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
+    st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
     if not df_filtrado.empty and "Status" in df_filtrado.columns:
         criticos = df_filtrado[df_filtrado["Status"].isin(["Crítico", "Monitorar"])]
         if not criticos.empty:
             bad_actors = criticos.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
+            
             ordem = st.radio("Ordenação:", ["Maior para o Menor (Descendente)", "Menor para o Maior (Ascendente)"], horizontal=True)
             asc = True if "Menor para o Maior" in ordem else False
-            bad_actors = bad_actors.sort_values(by="Ocorrências Críticas", ascending=asc)
-            fig_bad = px.bar(bad_actors, x="Frota", y="Ocorrências Críticas", color="Compartimento", text_auto=True)
+            
+            # Garante que o total por frota seja usado para a ordenação correta das barras no Plotly
+            totais_frota = bad_actors.groupby("Frota")["Ocorrências Críticas"].sum().sort_values(ascending=asc).index.tolist()
+
+            fig_bad = px.bar(
+                bad_actors, x="Frota", y="Ocorrências Críticas", color="Compartimento",
+                text_auto=True, title="Ocorrências Críticas por Frota e Compartimento"
+            )
+            fig_bad.update_xaxes(categoryorder='array', categoryarray=totais_frota)
             st.plotly_chart(fig_bad, use_container_width=True)
             st.dataframe(bad_actors, use_container_width=True)
 
@@ -459,7 +541,7 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
         st.subheader("1. Criar Plano de Ação a partir do Diagnóstico")
         st.dataframe(
             df_filtrado,
-            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir PDF")},
+            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir Documento PDF")},
             use_container_width=True
         )
         st.markdown("---")
