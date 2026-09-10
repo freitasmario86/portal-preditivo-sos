@@ -9,14 +9,14 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# Importações do ReportLab para Emissão de Relatório em PDF
+# ReportLab para emissão do laudo fiel em PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA E ESTADOS
 # ==============================================================================
 st.set_page_config(
     page_title="Portal Preditivo e Preventivo - S•O•S",
@@ -26,6 +26,9 @@ st.set_page_config(
 
 URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
 
+if "filtro_frota_grafico" not in st.session_state:
+    st.session_state.filtro_frota_grafico = None
+
 @st.cache_resource
 def init_supabase() -> Client:
     try:
@@ -33,13 +36,13 @@ def init_supabase() -> Client:
         key = st.secrets["supabase"]["SUPABASE_KEY"]
         return create_client(url, key)
     except Exception as e:
-        st.error(f"⚠️ Erro ao conectar com Supabase: {e}")
+        st.error(f"⚠️ Erro ao conectar no Supabase: {e}")
         return None
 
 supabase = init_supabase()
 
 # ==============================================================================
-# CARREGAMENTO E MAPPING DE DADOS
+# BANCO DE DADOS SUPABASE E PERSISTÊNCIA
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -65,7 +68,7 @@ def carregar_dados_base():
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            # Link Direto para Abrir o PDF Específico da Amostra
+            # Gera link para visualização e busca do PDF do laudo no Google Drive
             df["Link Laudo PDF"] = df["Nome do Arquivo PDF"].apply(
                 lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and str(x).strip() != "" else URL_PASTA_DRIVE
             )
@@ -156,7 +159,7 @@ df_base = carregar_dados_base()
 df_5w2h = carregar_plano_5w2h()
 
 # ==============================================================================
-# PARSER COMPLETO: CORREÇÃO DE MODELO E AMOSTRAS NORMAIS
+# PARSER COMPLETO FIDEDIGNO SOTREQ (EXTRAI MODELO COMERCIAL E STATUS CORRETOS)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -164,20 +167,18 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # Regex para capturar Modelos Comerciais Reais (SY215LR, SKT110S, SKT130, Cat 336, etc)
-    mod_comercial = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|3[0-9]{2}[A-Z]?|CAT[0-9A-Z]+|777[A-Z]?|D[8-9][R-T]?)', filename.upper())
-    if mod_comercial:
-        modelo = mod_comercial.group(1).strip()
+    # Busca o MODELO comercial (ex: SY215LR, SKT110S, SKT130) descartando o Número de Série
+    mod_match = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+    if mod_match and not re.search(r'^(D|CX|E|CBL|U)[0-9]{4,}', mod_match.group(1).strip()):
+        modelo = mod_match.group(1).strip()
     else:
-        # Busca no texto descartando códigos de série como D68808 ou CX0308
-        mod_txt = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
-        if mod_txt and not re.match(r'^(D|CX|E|CBL)[0-9]{4,}', mod_txt.group(1).strip()):
-            modelo = mod_txt.group(1).strip()
-        else:
-            modelo = "Geral"
+        mod_filename = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|3[0-9]{2}[A-Z]?|CAT[0-9A-Z]+|777[A-Z]?)', filename.upper())
+        modelo = mod_filename.group(1).strip() if mod_filename else "Geral"
 
-    frota_file = re.search(r'#([A-Z0-9]+)_', filename)
-    frota = frota_file.group(1) if frota_file else "Desconhecido"
+    frota_match = re.search(r'NÚMERO DE FROTA\s*:\s*([A-Z0-9]+)', texto, re.IGNORECASE)
+    if not frota_match:
+        frota_match = re.search(r'#([A-Z0-9]+)_', filename)
+    frota = frota_match.group(1).strip() if frota_match else "Desconhecido"
 
     ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
     controle = ctrl_m.group(0) if ctrl_m else f"TEMP_{filename}"
@@ -189,26 +190,29 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     }
     compartimento = "Outros"
     for k, v in mapa_comp.items():
-        if f"_{k}_" in filename.upper():
+        if f"_{k}_" in filename.upper() or k in texto.upper():
             compartimento = v
             break
 
-    # Leitura Fidedigna de Status (Inclusão Completa de "Normal")
+    # Leitura de Status no bloco da caixa do laudo
     texto_upper = texto.upper()
-    filename_upper = filename.upper()
-    if "_AR.PDF" in filename_upper or "CRÍTICO" in texto_upper or "CRITICO" in texto_upper:
+    if "CRÍTICO" in texto_upper or "CRITICO" in texto_upper or "_AR.PDF" in filename.upper():
         status = "Crítico"
-    elif "_MC.PDF" in filename_upper or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper:
+    elif "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper or "_MC.PDF" in filename.upper():
         status = "Monitorar"
     else:
-        status = "Normal"  # Garante que laudos normais sejam capturados
+        status = "Normal"
 
-    data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
+    data_match = re.search(r'DATA COLETA\s*([0-9]{2}-[A-Za-z]{3}-[0-9]{4})', texto, re.IGNORECASE)
+    if not data_match:
+        data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
     data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d/%m/%Y")
 
-    hrs_encontrados = re.findall(r'(\d+[\.,]?\d*)\s*HR', texto)
-    hr_equip = float(hrs_encontrados[0].replace(',', '.')) if len(hrs_encontrados) >= 1 else 0.0
-    hr_oleo = float(hrs_encontrados[1].replace(',', '.')) if len(hrs_encontrados) >= 2 else 0.0
+    hrs_equip_match = re.search(r'HRS/KM EQUIP\s*([0-9\.,]+)', texto)
+    hr_equip = float(hrs_equip_match.group(1).replace(',', '.')) if hrs_equip_match else 0.0
+
+    hrs_oleo_match = re.search(r'HRS/KM ÓLEO\s*([0-9\.,]+)', texto)
+    hr_oleo = float(hrs_oleo_match.group(1).replace(',', '.')) if hrs_oleo_match else 0.0
 
     elementos = {
         "Cu": 0.0, "Fe": 0.0, "Cr": 0.0, "Al": 0.0, "Pb": 0.0, "Sn": 0.0, "Si": 0.0,
@@ -228,17 +232,11 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
                 for idx, k in enumerate(keys_elem):
                     if idx < len(nums): elementos[k] = nums[idx]
 
-    match_v100 = re.search(r'(\d{2}\.\d{2})', texto)
+    match_v100 = re.search(r'V100\s*([0-9]{2}\.[0-9]{1,2})', texto)
     if match_v100: elementos["V100"] = float(match_v100.group(1))
 
-    match_h2o = re.search(r'(\d\.\d{2,4})', texto)
+    match_h2o = re.search(r'H2O\s*([0-9]\.[0-9]{2,4})', texto)
     if match_h2o: elementos["H2O"] = float(match_h2o.group(1))
-
-    iso_m = re.search(r'(\d{2})\/(\d{2})\/(\d{2})', texto)
-    if iso_m:
-        elementos["ISO4406_4u"] = float(iso_m.group(1))
-        elementos["ISO4406_6u"] = float(iso_m.group(2))
-        elementos["ISO4406_14u"] = float(iso_m.group(3))
 
     dados_finais = {
         "Data da Coleta": data_coleta,
@@ -256,7 +254,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# RELATÓRIO PDF EXECUTIVO GERADO PELO PORTAL
+# EMISSÃO DO RELATÓRIO EXECUTIVO EM PDF
 # ==============================================================================
 def gerar_relatorio_pdf_executivo(df_dados, df_planos):
     buffer = BytesIO()
@@ -332,11 +330,11 @@ def gerar_relatorio_pdf_executivo(df_dados, df_planos):
     return buffer
 
 # ==============================================================================
-# PAINEL LATERAL E FILTROS
+# MENU LATERAL E FILTROS
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
-st.sidebar.subheader("📄 Emissão de Relatório Executivo")
+st.sidebar.subheader("📄 Emissão do Relatório PDF")
 pdf_bytes = gerar_relatorio_pdf_executivo(df_base, df_5w2h)
 st.sidebar.download_button(
     label="📥 EMITIR RELATÓRIO PDF COMPLETO",
@@ -366,11 +364,19 @@ if not df_filtrado.empty:
     if f_frota != "Todas" and "Frota" in df_filtrado.columns: df_filtrado = df_filtrado[df_filtrado["Frota"] == f_frota]
     if f_comp != "Todos" and "Compartimento" in df_filtrado.columns: df_filtrado = df_filtrado[df_filtrado["Compartimento"] == f_comp]
 
+# Aplica o filtro interativo por clique do gráfico (Cross-Filtering)
+if st.session_state.filtro_frota_grafico:
+    st.info(f"🔍 Filtro Interativo Ativo via Gráfico: Frota **{st.session_state.filtro_frota_grafico}**")
+    if st.button("❌ Limpar Filtro do Gráfico"):
+        st.session_state.filtro_frota_grafico = None
+        st.rerun()
+    df_filtrado = df_filtrado[df_filtrado["Frota"] == st.session_state.filtro_frota_grafico]
+
 st.sidebar.markdown("---")
 opcao_menu = st.sidebar.radio(
     "Módulos do Portal:",
     [
-        "📊 Dashboard Geral", 
+        "📊 Dashboard Geral Interativo", 
         "📈 Séries Temporais & Variação Modelo",
         "🚨 Ranking de Bad Actors Ordenado", 
         "🔬 Distribuição Estatística Recente", 
@@ -381,10 +387,10 @@ opcao_menu = st.sidebar.radio(
 )
 
 # ==============================================================================
-# MÓDULOS DE VISUALIZAÇÃO
+# MÓDULOS DE VISUALIZAÇÃO INTERATIVA
 # ==============================================================================
-if opcao_menu == "📊 Dashboard Geral":
-    st.title("🚜 Dashboard Proativo de Análises de Óleo")
+if opcao_menu == "📊 Dashboard Geral Interativo":
+    st.title("🚜 Dashboard Proativo de Análises de Óleo (Interativo)")
     
     if df_filtrado.empty:
         st.info("💡 Nenhuma análise encontrada na base. Acesse **'📥 Importar Novos Laudos (PDF)'**.")
@@ -400,7 +406,7 @@ if opcao_menu == "📊 Dashboard Geral":
             if "Status" in df_filtrado.columns:
                 fig_status = px.bar(
                     df_filtrado["Status"].value_counts().reset_index(), 
-                    x='Status', y='count', title="Distribuição de Criticidade", 
+                    x='Status', y='count', title="Distribuição de Criticidade (Clique para detalhar)", 
                     text_auto=True, color='Status',
                     color_discrete_map={"Normal": "#10B981", "Monitorar": "#F59E0B", "Crítico": "#EF4444"}
                 )
@@ -421,7 +427,7 @@ if opcao_menu == "📊 Dashboard Geral":
         )
 
 # ==============================================================================
-# SÉRIES TEMPORAIS COM LINHA DE MODELO E FROTA
+# SÉRIES TEMPORAIS E COMPARATIVO DE MODELO
 # ==============================================================================
 elif opcao_menu == "📈 Séries Temporais & Variação Modelo":
     st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
@@ -430,15 +436,12 @@ elif opcao_menu == "📈 Séries Temporais & Variação Modelo":
         
         param_var = st.selectbox("Selecione o Parâmetro Químico:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
         
-        # Média histórica do modelo para o parâmetro selecionado
         df_media_modelo = df_temp.groupby(["Modelo", "Data da Coleta"])[param_var].mean().reset_index()
-        df_media_modelo["Legenda"] = "Média do Modelo (" + df_media_modelo["Modelo"] + ")"
 
         fig_temp = px.line(
             df_temp, x="Data da Coleta", y=param_var, color="Frota", markers=True,
             title=f"Evolução Temporal de {param_var}: Frota vs. Média do Modelo"
         )
-        # Adiciona a linha de referência do modelo
         for mod in df_temp["Modelo"].unique():
             df_m = df_media_modelo[df_media_modelo["Modelo"] == mod]
             fig_temp.add_trace(go.Scatter(
@@ -456,7 +459,7 @@ elif opcao_menu == "📈 Séries Temporais & Variação Modelo":
         )
 
 # ==============================================================================
-# RANKING DE BAD ACTORS ORDENADO
+# RANKING DE BAD ACTORS ORDENADO E CLICÁVEL
 # ==============================================================================
 elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
     st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
@@ -465,10 +468,9 @@ elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
         if not criticos.empty:
             bad_actors = criticos.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
             
-            ordem = st.radio("Ordenação:", ["Maior para o Menor (Descendente)", "Menor para o Maior (Ascendente)"], horizontal=True)
+            ordem = st.radio("Ordenação do Ranking:", ["Maior para o Menor (Descendente)", "Menor para o Maior (Ascendente)"], horizontal=True)
             asc = True if "Menor para o Maior" in ordem else False
             
-            # Garante que o total por frota seja usado para a ordenação correta das barras no Plotly
             totais_frota = bad_actors.groupby("Frota")["Ocorrências Críticas"].sum().sort_values(ascending=asc).index.tolist()
 
             fig_bad = px.bar(
@@ -476,7 +478,15 @@ elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
                 text_auto=True, title="Ocorrências Críticas por Frota e Compartimento"
             )
             fig_bad.update_xaxes(categoryorder='array', categoryarray=totais_frota)
-            st.plotly_chart(fig_bad, use_container_width=True)
+            
+            # Captura clique para filtrar demais relatórios do portal
+            evento_clique = st.plotly_chart(fig_bad, use_container_width=True, on_select="rerun")
+            
+            if evento_clique and "selection" in evento_clique and evento_clique["selection"]["points"]:
+                frota_clicada = evento_clique["selection"]["points"][0]["x"]
+                st.session_state.filtro_frota_grafico = frota_clicada
+                st.rerun()
+
             st.dataframe(bad_actors, use_container_width=True)
 
 elif opcao_menu == "🔬 Distribuição Estatística Recente":
