@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# Importações do ReportLab para Emissão do Relatório PDF
+# ReportLab para Emissão do Relatório PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -42,7 +42,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# CARREGAMENTO E BANCO DE DADOS SUPABASE
+# PERSISTÊNCIA DE DADOS SUPABASE
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -68,7 +68,6 @@ def carregar_dados_base():
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            # Gera link para visualização do PDF no Drive
             df["Link Laudo PDF"] = df["Nome do Arquivo PDF"].apply(
                 lambda x: f"https://drive.google.com/drive/u/0/search?q={x}" if pd.notna(x) and str(x).strip() != "" else URL_PASTA_DRIVE
             )
@@ -180,7 +179,7 @@ df_5w2h = carregar_plano_5w2h()
 df_limites = carregar_limites_modelos()
 
 # ==============================================================================
-# PARSER CORRIGIDO DE EXTRAÇÃO DE MODELO E VALORES
+# PARSER CORRIGIDO (DETECÇÃO DE _NAR.PDF / STATUS NORMAL E MODELO REAL)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -188,17 +187,18 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     for page in reader.pages:
         texto += page.extract_text() + "\n"
 
-    # 1. Extração do MODELO do Equipamento (Procura o campo explícito "MODELO:" no texto do laudo)
-    # Exemplo no PDF: "MODELO: SY215LR"
-    mod_txt = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
-    if mod_txt and not re.search(r'^(D|CX|E|CBL|U|LOCAL|N$)[0-9]*', mod_txt.group(1).strip().upper()):
-        modelo = mod_txt.group(1).strip()
-    else:
-        # Tenta pegar no nome do arquivo Sotreq
-        mod_filename = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|3[0-9]{2}[A-Z]?|CAT[0-9A-Z]+|777[A-Z]?)', filename.upper())
-        modelo = mod_filename.group(1).strip() if mod_filename else "Geral"
+    filename_upper = filename.upper()
+    texto_upper = texto.upper()
 
-    # 2. Extração de Frota Operacional
+    # 1. Extração Estrita do MODELO Comercial (Descarta números isolados de 3 dígitos do controle)
+    mod_comercial = re.search(r'MODELO\s*:\s*([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+    if mod_comercial and not re.match(r'^[0-9]{3}$', mod_comercial.group(1).strip()):
+        modelo = mod_comercial.group(1).strip()
+    else:
+        mod_tag = re.search(r'(SY[0-9A-Z]+LR|SKT[0-9A-Z]+S?|CAT[0-9A-Z]+|777[A-Z]?|D[8-9][R-T]?)', filename_upper)
+        modelo = mod_tag.group(1).strip() if mod_tag else "Geral"
+
+    # 2. Extração da FROTA Operacional
     frota_txt = re.search(r'NÚMERO DE FROTA\s*:\s*([A-Z0-9]+)', texto, re.IGNORECASE)
     if frota_txt and frota_txt.group(1).strip().upper() not in ["LOCAL", "N"]:
         frota = frota_txt.group(1).strip()
@@ -218,16 +218,17 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     }
     compartimento = "Outros"
     for k, v in mapa_comp.items():
-        if f"_{k}_" in filename.upper() or k in texto.upper():
+        if f"_{k}_" in filename_upper or k in texto_upper:
             compartimento = v
             break
 
-    # 5. Status da Amostra
-    texto_upper = texto.upper()
-    if "_AR.PDF" in filename.upper() or "CRÍTICO" in texto_upper or "CRITICO" in texto_upper:
+    # 5. Classificação Direta de Status (Inclui verificação explícita de _NAR.PDF para Normal)
+    if "_AR.PDF" in filename_upper or "CRÍTICO" in texto_upper or "CRITICO" in texto_upper:
         status = "Crítico"
-    elif "_MC.PDF" in filename.upper() or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper or "ATENCAO" in texto_upper:
+    elif "_MC.PDF" in filename_upper or "MONITORAR" in texto_upper or "ATENÇÃO" in texto_upper or "ATENCAO" in texto_upper:
         status = "Monitorar"
+    elif "_NAR.PDF" in filename_upper or "NORMAL" in texto_upper:
+        status = "Normal"
     else:
         status = "Normal"
 
@@ -241,7 +242,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     hrs_oleo_match = re.search(r'HRS/KM ÓLEO\s*([0-9\.,]+)', texto)
     hr_oleo = float(hrs_oleo_match.group(1).replace(',', '.')) if hrs_oleo_match else 0.0
 
-    # 7. Extração Ancorada de Valores Químicos da Tabela
+    # 7. Extração de Valores Químicos
     elementos = {
         "Cu": 0.0, "Fe": 0.0, "Cr": 0.0, "Al": 0.0, "Pb": 0.0, "Sn": 0.0, "Si": 0.0,
         "Na": 0.0, "K": 0.0, "B": 0.0, "Mo": 0.0, "Ni": 0.0, "Ag": 0.0, "Ti": 0.0,
@@ -505,12 +506,12 @@ elif opcao_menu == "⚙️ Parametrização de Limites por Modelo":
             st.dataframe(df_up_lim, use_container_width=True)
             if st.button("🚀 Gravar Limites Máximos no Supabase", type="primary"):
                 if salvar_limites_modelos_supabase(df_up_lim):
-                    st.success("✅ Limites por modelo salvos no Supabase!")
+                    st.success("✅ Limites por modelo salvos com sucesso no Supabase!")
         except Exception as e:
             st.error(f"Erro no arquivo: {e}")
 
     st.markdown("---")
-    st.subheader("Limites Atuais Cadastrados")
+    st.subheader("Limites Atuais Cadastrados no Banco")
     st.dataframe(df_limites, use_container_width=True)
 
 elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
@@ -639,17 +640,17 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
         st.dataframe(df_5w2h, use_container_width=True)
 
 # ==============================================================================
-# INGESTÃO E LIMPEZA COMPLETA DO BANCO SUPABASE
+# INGESTÃO E REPROCESSAMENTO OBRIGATÓRIO DA BASE
 # ==============================================================================
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
-    st.title("📥 Ingestão e Limpeza Completa da Base")
+    st.title("📥 Ingestão de Laudos e Reprocessamento Limpo")
     
-    st.subheader("1. Limpar Registros Antigos Errados no Supabase")
-    if st.button("⚠️ LIMPAR BANCO DE DADOS COMPLETO (TRUNCATE)", type="secondary"):
+    st.subheader("1. Limpar Registros Incorretos Antigos (Zerar Tabela laudos_sos)")
+    if st.button("⚠️ ZERAR BANCO DE DADOS ANTIGO PARA RE-UPLOAD COMPLETO", type="secondary"):
         if supabase:
-            supabase.table("laudos_sos").delete().neq("controle_lab", "x").execute()
+            supabase.table("laudos_sos").delete().neq("controle_lab", "X_INVALIDO").execute()
             st.cache_data.clear()
-            st.success("✅ Base do Supabase zerada! Agora faça o upload abaixo para inserir os laudos limpos.")
+            st.success("✅ Banco de dados zerado com sucesso! Agora faça o upload dos PDFs abaixo para inserir os dados limpos.")
             st.rerun()
 
     st.markdown("---")
@@ -668,5 +669,5 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
             
             sucesso = salvar_laudos_supabase(df_novos)
             if sucesso:
-                st.success(f"✅ {len(df_novos)} laudos extraídos e salvos com sucesso no Supabase!")
+                st.success(f"✅ {len(df_novos)} laudos reprocessados com sucesso no Supabase!")
                 st.dataframe(df_novos, use_container_width=True)
