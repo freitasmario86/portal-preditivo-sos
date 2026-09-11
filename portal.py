@@ -47,7 +47,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# FUNÇÕES DE CARREGAMENTO (PERSISTÊNCIA)
+# PERSISTÊNCIA DE DADOS (SUPABASE COM TODAS AS COLUNAS)
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -114,9 +114,6 @@ def carregar_limites_modelos():
     except Exception:
         return pd.DataFrame()
 
-# ==============================================================================
-# FUNÇÕES DE SALVAMENTO
-# ==============================================================================
 def salvar_laudos_supabase(df_novos):
     if not supabase or df_novos.empty: return False
     try:
@@ -192,15 +189,12 @@ def atualizar_5w2h_status_prazo(controle_lab, novo_status, novo_prazo, historico
         st.error(f"Erro ao atualizar plano: {e}")
         return False
 
-# ==============================================================================
-# LEITURA DE DADOS
-# ==============================================================================
 df_base = carregar_dados_base()
 df_5w2h = carregar_plano_5w2h()
 df_limites = carregar_limites_modelos()
 
 # ==============================================================================
-# LENTE OCR (EXTRAÇÃO DO PDF COM ANTI-DATA E HORÍMETROS)
+# LENTE OCR DE ALTA PRECISÃO (HORÍMETROS E METAIS)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -311,7 +305,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# RELATÓRIO EXECUTIVO EM PDF
+# RELATÓRIO EXECUTIVO EM PDF (INCLUI BAD ACTORS E ALARMES)
 # ==============================================================================
 def gerar_relatorio_pdf_executivo(df_dados):
     buffer = BytesIO()
@@ -351,7 +345,7 @@ def gerar_relatorio_pdf_executivo(df_dados):
     return buffer
 
 # ==============================================================================
-# MENU LATERAL E FILTROS MÚLTIPLOS
+# MENU LATERAL E FILTROS MÚLTIPLOS (CROSS-FILTERING SEGURO)
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
@@ -366,20 +360,20 @@ def aplicar_filtros(df, coluna, selecao):
     if not selecao or "Todas" in selecao or "Todos" in selecao: return df
     return df[df[coluna].isin(selecao)]
 
-opcoes_empresa = ["Todas"] + list(df_base["Cliente"].unique()) if not df_base.empty else []
-f_empresa = st.sidebar.multiselect("Empresa / Cliente:", opcoes_empresa, default="Todas")
+opcoes_empresa = ["Todas"] + list(df_base["Cliente"].dropna().unique()) if not df_base.empty else ["Todas"]
+f_empresa = st.sidebar.multiselect("Empresa / Cliente:", opcoes_empresa, default=["Todas"])
 
-opcoes_modelo = ["Todos"] + list(df_base["Modelo"].unique()) if not df_base.empty else []
-f_modelo = st.sidebar.multiselect("Modelo de Equipamento:", opcoes_modelo, default="Todos")
+opcoes_modelo = ["Todos"] + list(df_base["Modelo"].dropna().unique()) if not df_base.empty else ["Todos"]
+f_modelo = st.sidebar.multiselect("Modelo de Equipamento:", opcoes_modelo, default=["Todos"])
 
-opcoes_frota = ["Todas"] + list(df_base["Frota"].unique()) if not df_base.empty else []
-f_frota = st.sidebar.multiselect("Número de Frota:", opcoes_frota, default="Todas")
+opcoes_frota = ["Todas"] + list(df_base["Frota"].dropna().unique()) if not df_base.empty else ["Todas"]
+f_frota = st.sidebar.multiselect("Número de Frota:", opcoes_frota, default=["Todas"])
 
-opcoes_comp = ["Todos"] + list(df_base["Compartimento"].unique()) if not df_base.empty else []
-f_comp = st.sidebar.multiselect("Compartimento Analisado:", opcoes_comp, default="Todos")
+opcoes_comp = ["Todos"] + list(df_base["Compartimento"].dropna().unique()) if not df_base.empty else ["Todos"]
+f_comp = st.sidebar.multiselect("Compartimento Analisado:", opcoes_comp, default=["Todos"])
 
-opcoes_status = ["Todos"] + list(df_base["Status"].unique()) if not df_base.empty else []
-f_status = st.sidebar.multiselect("Status da Amostra:", opcoes_status, default="Todos")
+opcoes_status = ["Todos"] + list(df_base["Status"].dropna().unique()) if not df_base.empty else ["Todos"]
+f_status = st.sidebar.multiselect("Status da Amostra:", opcoes_status, default=["Todos"])
 
 df_filtrado = df_base.copy()
 if not df_filtrado.empty:
@@ -487,6 +481,7 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
 elif opcao_menu == "📈 Séries Temporais & Variação":
     st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
     if not df_filtrado.empty and "Data_Convertida" in df_filtrado.columns:
+        
         df_temp = df_filtrado.sort_values(by=["Modelo", "Frota", "Data_Convertida"]).dropna(subset=['Data_Convertida'])
         
         if not df_temp.empty:
@@ -558,7 +553,7 @@ elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
             k1.metric(f"Média Populacional $\mu$ ({comp_sel})", f"{m_global:.1f}")
             k2.metric(f"Desvio Padrão $\sigma$", f"{std_global:.1f}")
 
-            # Gráfico de barras simples em azul como solicitado
+            # Gráfico Simples Azul com Linhas de Alarme
             fig_limpo = px.histogram(df_comp_todos, x=param, title=f"Distribuição de {param} ({comp_sel})", text_auto=True, opacity=0.8, color_discrete_sequence=['#3b82f6'])
             fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black", annotation_text=f"$\mu$: {m_global:.1f}")
             fig_limpo.add_vline(x=m_global + std_global, line_dash="dot", line_color="#F59E0B", annotation_text="Alerta ($> \mu+1\sigma$)")
@@ -593,7 +588,7 @@ elif opcao_menu == "🔥 Análise de Correlação (Spearman)":
             fig_corr = px.imshow(matriz, text_auto=".2f", color_continuous_scale="RdBu_r")
             renderizar_grafico_seguro(fig_corr, use_container_width=True)
         else:
-            st.warning("⚠️ Os horímetros não foram detectados ou são insuficientes. Retorne à aba de Ingestão e zere o banco antes de reenviar os PDFs para forçar o novo extrator a agir.")
+            st.warning("⚠️ Os horímetros não foram detectados ou são insuficientes na base. Verifique se o banco de dados já foi zerado e repovoado com a última versão do script.")
 
 elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
     st.title("📉 Curva de Sobrevivência (Weibull) com Cursor Móvel")
@@ -617,7 +612,7 @@ elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
             except Exception:
                 st.warning("⚠️ Regressão matemática inválida. Os horímetros lidos estão zerados ou corrompidos.")
         else:
-            st.warning("⚠️ Dados insuficientes. Retorne à aba de Ingestão e zere o banco antes de reenviar os PDFs com o novo OCR ativo.")
+            st.warning("⚠️ Não há dados suficientes (mínimo de 3 registros válidos ÚNICOS de Horímetro do Óleo > 0). Verifique se o banco de dados foi repovoado com os novos horímetros.")
 
 elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
     st.title("🔍 RCA & Gestão de Ações 5W2H")
@@ -710,7 +705,7 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
     st.title("📥 Ingestão de Laudos e Correção Definitiva da Base")
     
     st.subheader("⚠️ LIMPEZA DO BANCO DE DADOS (Zerar Erros do Passado)")
-    st.write("A base do Supabase contém os laudos antigos com Horímetros Zerados e 'Anos' no lugar dos metais. **Zere a base antes do novo upload!**")
+    st.write("A base do Supabase contém os laudos antigos com Horímetros Zerados. **Zere a base antes do novo upload para as curvas voltarem a funcionar!**")
     if st.button("🚨 ZERAR BANCO DE DADOS ANTIGO PARA RE-UPLOAD", type="secondary"):
         if supabase:
             supabase.table("laudos_sos").delete().neq("controle_lab", "X_INVALIDO").execute()
