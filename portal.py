@@ -16,7 +16,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA E ESTADOS INTERATIVOS
 # ==============================================================================
 st.set_page_config(page_title="Portal Preditivo e Preventivo - S•O•S", page_icon="🚜", layout="wide")
 
@@ -47,7 +47,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# PERSISTÊNCIA DE DADOS
+# FUNÇÕES DE CARREGAMENTO (PERSISTÊNCIA)
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -105,6 +105,18 @@ def carregar_plano_5w2h():
     except Exception:
         return pd.DataFrame()
 
+@st.cache_data(ttl=5)
+def carregar_limites_modelos():
+    if not supabase: return pd.DataFrame()
+    try:
+        res = supabase.table("limites_modelos").select("*").execute()
+        return pd.DataFrame(res.data)
+    except Exception:
+        return pd.DataFrame()
+
+# ==============================================================================
+# FUNÇÕES DE SALVAMENTO
+# ==============================================================================
 def salvar_laudos_supabase(df_novos):
     if not supabase or df_novos.empty: return False
     try:
@@ -122,7 +134,6 @@ def salvar_laudos_supabase(df_novos):
             "ISO_10u": "iso_10u", "ISO_18u": "iso_18u", "ISO_21u": "iso_21u", "ISO_38u": "iso_38u", "ISO_50u": "iso_50u",
             "Nome do Arquivo PDF": "nome_arquivo"
         })
-        # Remove colunas auxiliares geradas pelo portal
         colunas_remover = ["Link Laudo PDF", "Data_Convertida"]
         for col in colunas_remover:
             if col in df_para_banco.columns:
@@ -137,8 +148,59 @@ def salvar_laudos_supabase(df_novos):
         st.error(f"Erro ao salvar no Supabase: {e}")
         return False
 
+def salvar_limites_modelos_supabase(df_limites):
+    if not supabase or df_limites.empty: return False
+    try:
+        registros = df_limites.to_dict(orient="records")
+        supabase.table("limites_modelos").upsert(registros).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar limites: {e}")
+        return False
+
+def salvar_5w2h_supabase(df_5w2h):
+    if not supabase or df_5w2h.empty: return False
+    try:
+        df_p = df_5w2h.rename(columns={
+            "Nº Controle Lab": "controle_lab", "Data Registro": "data_registro",
+            "Frota": "frota", "Modelo": "modelo", "Compartimento": "compartimento",
+            "Status Amostra": "status_amostra", "O Que (What)": "what", "Por Que (Why)": "why",
+            "Onde (Where)": "where", "Quando / Prazo (When)": "when_prazo",
+            "Quem / Responsável (Who)": "who_resp", "E-mail Responsável": "email_resp",
+            "Como (How)": "how", "Quanto Custa (How Much)": "how_much",
+            "Status Execução": "status_execucao", "Histórico de Alterações": "historico"
+        })
+        if "id" in df_p.columns: df_p = df_p.drop(columns=["id"])
+        registros = df_p.to_dict(orient="records")
+        supabase.table("plano_5w2h").insert(registros).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar 5W2H: {e}")
+        return False
+
+def atualizar_5w2h_status_prazo(controle_lab, novo_status, novo_prazo, historico_atualizado):
+    if not supabase: return False
+    try:
+        payload = {"status_execucao": novo_status, "historico": historico_atualizado}
+        if novo_prazo: payload["when_prazo"] = novo_prazo
+        supabase.table("plano_5w2h").update(payload).eq("controle_lab", controle_lab).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar plano: {e}")
+        return False
+
 # ==============================================================================
-# LENTE OCR DE ALTA PRECISÃO (HORÍMETROS E METAIS)
+# LEITURA DE DADOS
+# ==============================================================================
+df_base = carregar_dados_base()
+df_5w2h = carregar_plano_5w2h()
+df_limites = carregar_limites_modelos()
+
+# ==============================================================================
+# LENTE OCR (EXTRAÇÃO DO PDF COM ANTI-DATA E HORÍMETROS)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -149,7 +211,6 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     texto_upper = texto.upper()
     texto_topo = texto_upper[:2000]
 
-    # Modelo Exato
     mod_txt = re.search(r'MODELO[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
     if mod_txt and mod_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO", ""]:
         modelo = mod_txt.group(1).strip().upper()
@@ -157,7 +218,6 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         mod_fallback = re.search(r'\b(SY[0-9]+[A-Z]*|SKT[0-9]+[A-Z]*|CAT\s*[0-9]+[A-Z]*|3[0-9]{2}[A-Z]*|D[6-9][A-Z]*|7[0-9]{2}[A-Z]*|9[0-9]{2}[A-Z]*|1[2-6][0-9][A-Z]*)\b', texto_topo, re.IGNORECASE)
         modelo = mod_fallback.group(1).strip().upper().replace(" ", "") if mod_fallback else "Geral"
 
-    # Frota
     frota_txt = re.search(r'FROTA[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
     if frota_txt and frota_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO", ""]:
         frota = frota_txt.group(1).strip().upper()
@@ -165,13 +225,11 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         frota_match = re.search(r'#([A-Z0-9]+)_', filename_upper)
         frota = frota_match.group(1).strip().upper() if frota_match and frota_match.group(1).strip().upper() not in ["N", "LOCAL"] else "Desconhecido"
 
-    # Controle Numérico
     ctrl_m = re.search(r'\d{3}-\d{5}-\d{4}', texto)
     core_ctrl = ctrl_m.group(0) if ctrl_m else "000-00000-0000"
     controle = f"U{core_ctrl}" if ctrl_m else f"TEMP_{filename}"
     sufixo_ctrl = core_ctrl.split("-")[-1]
 
-    # Compartimento
     mapa_comp = {
         'FD_LT': 'COMANDO F ESQ', 'FD_RT': 'COMANDO F DIR', 'SW_DR': 'COMANDO GIRO',
         'ENG': 'MOTOR', 'HS': 'SISTEMA HIDRAULICO', 'DIFF_FR': 'DIFERENCIAL DIANT',
@@ -183,7 +241,6 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
             compartimento = v
             break
 
-    # Status Seguro
     if "_AR.PDF" in filename_upper: status = "Crítico"
     elif "_MC.PDF" in filename_upper: status = "Monitorar"
     elif "_NAR.PDF" in filename_upper: status = "Normal"
@@ -192,7 +249,6 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         elif "MONITORAR" in texto_topo or "ATENÇÃO" in texto_topo or "ATENCAO" in texto_topo: status = "Monitorar"
         else: status = "Normal"
 
-    # Data Coleta
     data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
     data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d-%b-%Y")
 
@@ -208,18 +264,15 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     elementos_encontrados = False
 
     for idx in idx_linhas:
-        # A CAÇADA AOS HORÍMETROS: Busca ampliada no bloco para evitar zeramento
         bloco_horas = " ".join(linhas[idx : idx+12])
-        # Padrão flexível: Pega qualquer número seguido de HR ou KM
         horas_list = re.findall(r'(\d+[\.,]?\d*)\s*(?:HR|KM)', bloco_horas, re.IGNORECASE)
         if len(horas_list) >= 1 and hr_equip == 0.0: hr_equip = float(horas_list[0].replace(',', '.'))
         if len(horas_list) >= 2 and hr_oleo == 0.0: hr_oleo = float(horas_list[1].replace(',', '.'))
 
-        # A CAÇADA AOS METAIS
         bloco_texto = " ".join(linhas[idx : idx+5])
         bloco_limpo = re.sub(r'[A-Za-z0-9]?\d{3}-\d{5}-\d{4}', ' ', bloco_texto)
         bloco_limpo = re.sub(rf'\b{sufixo_ctrl}\b', ' ', bloco_limpo)
-        bloco_limpo = re.sub(r'\b202[0-9]\b', ' ', bloco_limpo) # Filtro Anti-Data
+        bloco_limpo = re.sub(r'\b202[0-9]\b', ' ', bloco_limpo) 
         bloco_limpo = re.sub(r'\d{2}-[a-zA-Z]{3}-\d{4}', ' ', bloco_limpo)
         
         nums = [float(n) for n in re.findall(r'\b\d+\b', bloco_limpo)]
@@ -258,7 +311,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# RELATÓRIO EXECUTIVO EM PDF (INCLUI BAD ACTORS)
+# RELATÓRIO EXECUTIVO EM PDF
 # ==============================================================================
 def gerar_relatorio_pdf_executivo(df_dados):
     buffer = BytesIO()
@@ -298,12 +351,8 @@ def gerar_relatorio_pdf_executivo(df_dados):
     return buffer
 
 # ==============================================================================
-# MENU LATERAL E FILTROS MÚLTIPLOS (CROSS-FILTERING)
+# MENU LATERAL E FILTROS MÚLTIPLOS
 # ==============================================================================
-df_base = carregar_dados_base()
-df_5w2h = carregar_plano_5w2h()
-df_limites = carregar_limites_modelos()
-
 st.sidebar.title("🛠️ Painel de Controle")
 
 st.sidebar.subheader("📄 Relatório Executivo PDF")
@@ -395,7 +444,7 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
             if "Status" in df_filtrado.columns:
                 fig_status = px.bar(
                     df_filtrado["Status"].value_counts().reset_index(), 
-                    x='Status', y='count', title="Distribuição de Criticidade (Selecione a barra)", 
+                    x='Status', y='count', title="Distribuição de Criticidade", 
                     text_auto=True, color='Status',
                     color_discrete_map={"Normal": "#10B981", "Monitorar": "#F59E0B", "Crítico": "#EF4444"}
                 )
@@ -406,7 +455,7 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
                     
         with col2:
             if "Compartimento" in df_filtrado.columns:
-                fig_comp = px.pie(df_filtrado, names="Compartimento", title="Amostras por Compartimento (Selecione a fatia)", hole=0.4)
+                fig_comp = px.pie(df_filtrado, names="Compartimento", title="Amostras por Compartimento", hole=0.4)
                 fig_comp.update_traces(textinfo='percent+label')
                 evento = renderizar_grafico_seguro(fig_comp, use_container_width=True, on_select="rerun")
                 if evento and "selection" in evento and evento["selection"]["points"]:
@@ -426,6 +475,14 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
                 return ''
                 
             st.dataframe(pivot_status.style.map(color_status), use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("Base de Dados Completa")
+        st.dataframe(
+            df_filtrado,
+            column_config={"Link Laudo PDF": st.column_config.LinkColumn("Laudo PDF", display_text="📄 Abrir Documento")},
+            use_container_width=True
+        )
 
 elif opcao_menu == "📈 Séries Temporais & Variação":
     st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
@@ -450,6 +507,7 @@ elif opcao_menu == "📈 Séries Temporais & Variação":
                 ))
             
             renderizar_grafico_seguro(fig_temp, use_container_width=True)
+            st.dataframe(df_temp.drop(columns=['Data_Convertida']), use_container_width=True)
 
 elif opcao_menu == "🚨 Ranking de Bad Actors":
     st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
@@ -476,7 +534,7 @@ elif opcao_menu == "🚨 Ranking de Bad Actors":
 elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
     st.title("🔬 Distribuição Estatística Limpa e Alarmes")
     
-    st.info("💡 A Média ($\mu$) e Desvio Padrão ($\sigma$) são calculados EXCLUSIVAMENTE com as amostras Normais do equipamento para garantir a pureza da linha base estatística.")
+    st.info("💡 A Média ($\mu$) e Desvio Padrão ($\sigma$) são calculados EXCLUSIVAMENTE com as amostras Normais do equipamento para garantir a pureza da linha base estatística. O gráfico plotará todas as amostras para mostrar quem está fora da faixa.")
     
     if df_filtrado.empty:
         st.warning("⚠️ Nenhuma amostra na base com os filtros selecionados.")
@@ -486,7 +544,6 @@ elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
         cols_opcoes = ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "OXI", "NIT", "SUL"]
         param = c2.selectbox("Selecione o Parâmetro de Desgaste:", cols_opcoes)
         
-        # Isola os Normais para matemática
         df_comp_normal = df_filtrado[(df_filtrado["Compartimento"] == comp_sel) & (df_filtrado["Status"] == "Normal")]
         df_comp_todos = df_filtrado[df_filtrado["Compartimento"] == comp_sel].copy()
         
@@ -501,7 +558,7 @@ elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
             k1.metric(f"Média Populacional $\mu$ ({comp_sel})", f"{m_global:.1f}")
             k2.metric(f"Desvio Padrão $\sigma$", f"{std_global:.1f}")
 
-            # Gráfico de barras simples em azul (Conforme pedido)
+            # Gráfico de barras simples em azul como solicitado
             fig_limpo = px.histogram(df_comp_todos, x=param, title=f"Distribuição de {param} ({comp_sel})", text_auto=True, opacity=0.8, color_discrete_sequence=['#3b82f6'])
             fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black", annotation_text=f"$\mu$: {m_global:.1f}")
             fig_limpo.add_vline(x=m_global + std_global, line_dash="dot", line_color="#F59E0B", annotation_text="Alerta ($> \mu+1\sigma$)")
@@ -536,7 +593,7 @@ elif opcao_menu == "🔥 Análise de Correlação (Spearman)":
             fig_corr = px.imshow(matriz, text_auto=".2f", color_continuous_scale="RdBu_r")
             renderizar_grafico_seguro(fig_corr, use_container_width=True)
         else:
-            st.warning("⚠️ Os horímetros não foram detectados ou são insuficientes. Retorne à aba de Ingestão e zere o banco antes de reenviar os PDFs.")
+            st.warning("⚠️ Os horímetros não foram detectados ou são insuficientes. Retorne à aba de Ingestão e zere o banco antes de reenviar os PDFs para forçar o novo extrator a agir.")
 
 elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
     st.title("📉 Curva de Sobrevivência (Weibull) com Cursor Móvel")
@@ -675,7 +732,6 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
             df_novos = pd.DataFrame(novos)
             df_novos = df_novos.drop_duplicates(subset=["Nº Controle Lab"], keep="last")
             
-            sucesso = salvar_laudos_supabase(df_novos)
-            if sucesso:
+            if salvar_laudos_supabase(df_novos):
                 st.success(f"✅ {len(df_novos)} laudos extraídos e salvos limpos!")
                 st.dataframe(df_novos, use_container_width=True)
