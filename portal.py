@@ -9,14 +9,14 @@ import plotly.graph_objects as go
 from datetime import datetime
 from supabase import create_client, Client
 
-# ReportLab para Emissão do Relatório PDF
+# Importações para a Geração do Relatório PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA E ESTADOS
+# CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
 st.set_page_config(
     page_title="Portal Preditivo e Preventivo - S•O•S",
@@ -42,7 +42,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# PERSISTÊNCIA DE DADOS SUPABASE
+# PERSISTÊNCIA SUPABASE
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -179,7 +179,7 @@ df_5w2h = carregar_plano_5w2h()
 df_limites = carregar_limites_modelos()
 
 # ==============================================================================
-# PARSER BLINDADO (MODELO EXATO, STATUS POR ARQUIVO E TABELA TRAVADA)
+# PARSER EXTRAÇÃO INTELIGENTE (SEM FALSOS POSITIVOS DE HISTÓRICO)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -188,42 +188,27 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         texto += page.extract_text() + "\n"
 
     filename_upper = filename.upper()
-    linhas = texto.split('\n')
+    texto_upper = texto.upper()
+    texto_topo = texto_upper[:1500] # Limita a leitura para não ser poluído pelo histórico do final
 
-    # 1. Extração Estrita do STATUS via Nome do Arquivo 
-    # (Isso evita que laudos antigos "Críticos" no histórico contaminem a leitura atual)
-    if "_AR.PDF" in filename_upper:
-        status = "Crítico"
-    elif "_MC.PDF" in filename_upper:
-        status = "Monitorar"
-    elif "_NAR.PDF" in filename_upper:
-        status = "Normal"
+    # 1. EXTRAÇÃO DE MODELO (Dupla Verificação)
+    mod_txt = re.search(r'MODELO[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+    if mod_txt and mod_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO"]:
+        modelo = mod_txt.group(1).strip().upper()
     else:
-        status = "Normal"
+        # Radar de maquinário pesado: busca padrões Cat / Sany caso o texto 'MODELO:' esteja quebrado
+        mod_fallback = re.search(r'\b(SY[0-9]+[A-Z]*|SKT[0-9]+[A-Z]*|CAT\s*[0-9]+[A-Z]*|3[0-9]{2}[A-Z]*|D[6-9][A-Z]*|7[0-9]{2}[A-Z]*|9[0-9]{2}[A-Z]*|1[2-6][0-9][A-Z]*)\b', texto_topo, re.IGNORECASE)
+        modelo = mod_fallback.group(1).strip().upper().replace(" ", "") if mod_fallback else "Geral"
 
-    # 2. Extração de MODELO (Ignorando a linha de "MODELO DO COMPARTIMENTO")
-    modelo = "Geral"
-    for linha in linhas:
-        if "MODELO:" in linha.upper() and "COMPARTIMENTO" not in linha.upper():
-            partes = linha.upper().split("MODELO:")
-            if len(partes) > 1:
-                val = partes[1].split('|')[0].strip()
-                if val and val not in ["N", "LOCAL", "DO", ""]:
-                    modelo = val
-                    break
-
-    # 3. Extração da FROTA Operacional
-    frota_match = re.search(r'#([A-Z0-9]+)_', filename_upper)
-    if frota_match and frota_match.group(1) not in ["LOCAL", "N"]:
-        frota = frota_match.group(1)
+    # 2. EXTRAÇÃO DE FROTA
+    frota_txt = re.search(r'FROTA[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
+    if frota_txt and frota_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO"]:
+        frota = frota_txt.group(1).strip().upper()
     else:
-        frota = "Desconhecido"
+        frota_match = re.search(r'#([A-Z0-9]+)_', filename_upper)
+        frota = frota_match.group(1).strip().upper() if frota_match and frota_match.group(1).strip().upper() not in ["N", "LOCAL"] else "Desconhecido"
 
-    # 4. Número de Controle
-    ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
-    controle = ctrl_m.group(0) if ctrl_m else f"TEMP_{filename}"
-
-    # 5. Compartimento
+    # 3. EXTRAÇÃO DE COMPARTIMENTO
     mapa_comp = {
         'FD_LT': 'COMANDO F ESQ', 'FD_RT': 'COMANDO F DIR', 'SW_DR': 'COMANDO GIRO',
         'ENG': 'MOTOR', 'HS': 'SISTEMA HIDRAULICO', 'DIFF_FR': 'DIFERENCIAL DIANT',
@@ -231,11 +216,31 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     }
     compartimento = "Outros"
     for k, v in mapa_comp.items():
-        if f"_{k}_" in filename_upper or k in texto.upper():
+        if f"_{k}_" in filename_upper or k in texto_topo:
             compartimento = v
             break
 
-    # 6. Datas e Horímetros
+    # 4. CONTROLE LAB
+    ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
+    controle = ctrl_m.group(0) if ctrl_m else f"TEMP_{filename}"
+
+    # 5. STATUS DA AMOSTRA (Prioridade total para o nome do arquivo para ignorar o histórico Crítico)
+    if "_AR.PDF" in filename_upper:
+        status = "Crítico"
+    elif "_MC.PDF" in filename_upper:
+        status = "Monitorar"
+    elif "_NAR.PDF" in filename_upper:
+        status = "Normal"
+    else:
+        # Se não houver tag no arquivo, usa a trava de leitura no topo (ignora rodapé histórico)
+        if "CRÍTICO" in texto_topo or "CRITICO" in texto_topo:
+            status = "Crítico"
+        elif "MONITORAR" in texto_topo or "ATENÇÃO" in texto_topo or "ATENCAO" in texto_topo:
+            status = "Monitorar"
+        else:
+            status = "Normal"
+
+    # 6. DATAS E HORÍMETROS
     data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
     data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d/%m/%Y")
 
@@ -245,7 +250,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     hrs_oleo_match = re.search(r'HRS/KM ÓLEO\s*([0-9\.,]+)', texto)
     hr_oleo = float(hrs_oleo_match.group(1).replace(',', '.')) if hrs_oleo_match else 0.0
 
-    # 7. Tabela de Valores Químicos (Com Trava Anti-Sobrescrita)
+    # 7. EXTRAÇÃO ANCORADA DE VALORES (TRAVA DE SOBRESCRITA)
     elementos = {
         "Cu": 0.0, "Fe": 0.0, "Cr": 0.0, "Al": 0.0, "Pb": 0.0, "Sn": 0.0, "Si": 0.0,
         "Na": 0.0, "K": 0.0, "B": 0.0, "Mo": 0.0, "Ni": 0.0, "Ag": 0.0, "Ti": 0.0,
@@ -253,12 +258,12 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         "V100": 0.0, "H2O": 0.0, "ISO4406_4u": 0.0, "ISO4406_6u": 0.0, "ISO4406_14u": 0.0
     }
 
+    linhas = texto.split('\n')
     elementos_encontrados = False
+    
     for i, linha in enumerate(linhas):
         if controle in linha and not elementos_encontrados:
             bloco_texto = " ".join(linhas[i:i+3])
-            
-            # Limpa qualquer resquício do número de controle que esteja mascarando dados químicos
             sufixo_ctrl = controle.split("-")[-1]
             bloco_limpo = bloco_texto.replace(controle, "").replace(sufixo_ctrl, "")
             
@@ -267,7 +272,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
                 keys_elem = ["Cu", "Fe", "Cr", "Al", "Pb", "Sn", "Si", "Na", "K", "B", "Mo", "Ni", "Ag", "Ti", "V", "Mn", "Ca", "Mg", "Zn", "P", "Ba"]
                 for idx, k in enumerate(keys_elem):
                     if idx < len(nums): elementos[k] = nums[idx]
-                elementos_encontrados = True # Impede ler as tabelas de baixo do PDF!
+                elementos_encontrados = True # Interrompe após achar os metais da primeira tabela
 
     match_v100 = re.search(r'V100\s*([0-9]{2}\.[0-9]{1,2})', texto)
     if match_v100: elementos["V100"] = float(match_v100.group(1))
@@ -401,7 +406,7 @@ if not df_filtrado.empty:
     if f_comp != "Todos" and "Compartimento" in df_filtrado.columns: df_filtrado = df_filtrado[df_filtrado["Compartimento"] == f_comp]
 
 if st.session_state.filtro_frota_grafico:
-    st.info(f"🔍 Filtro Interativo Ativo via Gráfico: Frota **{st.session_state.filtro_frota_grafico}**")
+    st.info(f"🔍 Filtro Interativo Ativo: Frota **{st.session_state.filtro_frota_grafico}**")
     if st.button("❌ Limpar Filtro do Gráfico"):
         st.session_state.filtro_frota_grafico = None
         st.rerun()
@@ -412,7 +417,7 @@ opcao_menu = st.sidebar.radio(
     "Módulos do Portal:",
     [
         "📊 Dashboard Geral Interativo", 
-        "📈 Séries Temporais & Variação Modelo",
+        "📈 Séries Temporais & Variação",
         "🚨 Ranking de Bad Actors Ordenado", 
         "🔬 Distribuição Estatística (Apenas Normais)", 
         "⚙️ Parametrização de Limites por Modelo",
@@ -426,10 +431,10 @@ opcao_menu = st.sidebar.radio(
 # MÓDULOS DE VISUALIZAÇÃO
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral Interativo":
-    st.title("🚜 Dashboard Proativo de Análises de Óleo (Interativo)")
+    st.title("🚜 Dashboard Proativo de Análises de Óleo")
     
     if df_filtrado.empty:
-        st.info("💡 Nenhuma análise encontrada na base. Acesse **'📥 Importar Novos Laudos (PDF)'**.")
+        st.info("💡 Nenhuma análise encontrada na base.")
     else:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total de Amostras", len(df_filtrado))
@@ -441,9 +446,8 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
         with col1:
             if "Status" in df_filtrado.columns:
                 fig_status = px.bar(
-                    df_filtrado["Status"].value_counts().reset_index(), 
-                    x='Status', y='count', title="Distribuição de Criticidade", 
-                    text_auto=True, color='Status',
+                    df_filtrado["Status"].value_counts().reset_index(), x='Status', y='count', 
+                    title="Distribuição de Criticidade", text_auto=True, color='Status',
                     color_discrete_map={"Normal": "#10B981", "Monitorar": "#F59E0B", "Crítico": "#EF4444"}
                 )
                 st.plotly_chart(fig_status, use_container_width=True)
@@ -463,22 +467,21 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
         )
 
 elif opcao_menu == "🔬 Distribuição Estatística (Apenas Normais)":
-    st.title("🔬 Distribuição Estatística Populacional (Estritamente Amostras Normais)")
-    
+    st.title("🔬 Distribuição Estatística Populacional (Estritamente Normais)")
     df_normais = df_base[df_base["Status"] == "Normal"].copy()
     
     if df_normais.empty:
-        st.warning("⚠️ Nenhuma amostra com status 'Normal' encontrada na base de dados.")
+        st.warning("⚠️ Nenhuma amostra Normal na base.")
     else:
         c1, c2 = st.columns(2)
-        comp_sel = c1.selectbox("Selecione o Compartimento para Benchmark Global:", list(df_normais["Compartimento"].unique()))
-        param = c2.selectbox("Selecione o Elemento Químico / Propriedade:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
+        comp_sel = c1.selectbox("Selecione o Compartimento:", list(df_normais["Compartimento"].unique()))
+        param = c2.selectbox("Selecione o Parâmetro:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
         
         df_comp_total = df_normais[df_normais["Compartimento"] == comp_sel]
         frotas_comp = list(df_comp_total["Frota"].unique()) if "Frota" in df_comp_total.columns else []
         
         if frotas_comp:
-            frota_sel = st.selectbox("Selecione a Frota Específica para Comparar:", frotas_comp)
+            frota_sel = st.selectbox("Comparar com Frota:", frotas_comp)
             df_frota_especifica = df_comp_total[df_comp_total["Frota"] == frota_sel]
 
             if not df_comp_total.empty and param in df_comp_total.columns:
@@ -488,19 +491,17 @@ elif opcao_menu == "🔬 Distribuição Estatística (Apenas Normais)":
 
                 st.markdown("---")
                 k1, k2, k3 = st.columns(3)
-                k1.metric(f"Média Normal {param} ({comp_sel})", f"{m_global:.1f} ppm")
-                k2.metric(f"Média Frota {frota_sel} (Normais)", f"{m_frota:.1f} ppm", delta=f"{m_frota - m_global:.1f} ppm vs Média Global")
-                k3.metric("Desvio Padrão Global (σ)", f"{std_global:.1f}")
+                k1.metric(f"Média Normal ({comp_sel})", f"{m_global:.1f} ppm")
+                k2.metric(f"Média Frota {frota_sel}", f"{m_frota:.1f} ppm", delta=f"{m_frota - m_global:.1f} ppm")
+                k3.metric("Desvio Padrão (σ)", f"{std_global:.1f}")
 
-                df_comp_total["Grupo_Comparacao"] = np.where(df_comp_total["Frota"] == frota_sel, f"Frota {frota_sel}", "Outras Frotas (Normais)")
+                df_comp_total["Grupo"] = np.where(df_comp_total["Frota"] == frota_sel, f"Frota {frota_sel}", "Outros Normais")
 
                 fig_limpo = px.histogram(
-                    df_comp_total, x=param, color="Grupo_Comparacao", barmode="overlay",
-                    title=f"Distribuição Normal de {param}: Frota {frota_sel} vs. Média Populacional ({comp_sel})",
-                    text_auto=True, opacity=0.75
+                    df_comp_total, x=param, color="Grupo", barmode="overlay",
+                    title=f"Distribuição Normal de {param}", text_auto=True, opacity=0.75
                 )
-                fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black", annotation_text=f"Média Normal: {m_global:.1f}")
-                fig_limpo.add_vline(x=m_global + 2*std_global, line_dash="dot", line_color="red", annotation_text="+2σ Limite")
+                fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black")
                 st.plotly_chart(fig_limpo, use_container_width=True)
 
 elif opcao_menu == "⚙️ Parametrização de Limites por Modelo":
@@ -543,7 +544,7 @@ elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
 
             st.dataframe(bad_actors, use_container_width=True)
 
-elif opcao_menu == "📈 Séries Temporais & Variação Modelo":
+elif opcao_menu == "📈 Séries Temporais & Variação":
     st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
     if not df_filtrado.empty and "Data da Coleta" in df_filtrado.columns:
         df_temp = df_filtrado.sort_values(by=["Modelo", "Frota", "Data da Coleta"]).copy()
@@ -618,7 +619,7 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
                         "Status Execução": "Em Andamento", "Histórico de Alterações": f"Criado em {datetime.now().strftime('%d/%m/%Y %H:%M')}"
                     }
                     salvar_5w2h_supabase(pd.DataFrame([novo_reg]))
-                    st.success("✅ Plano 5W2H gravado no banco de dados Supabase!")
+                    st.success("✅ Plano gravado no banco de dados!")
 
     with tab2:
         if not df_5w2h.empty and "Nº Controle Lab" in df_5w2h.columns:
@@ -646,18 +647,15 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
                     st.rerun()
         st.dataframe(df_5w2h, use_container_width=True)
 
-# ==============================================================================
-# INGESTÃO E REPROCESSAMENTO OBRIGATÓRIO DA BASE
-# ==============================================================================
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
-    st.title("📥 Ingestão de Laudos e Correção Definitiva da Base")
+    st.title("📥 Ingestão de Laudos e Correção Definitiva")
     
-    st.subheader("⚠️ PASSO 1: Apagar os laudos com erros")
+    st.subheader("⚠️ PASSO 1 OBRIGATÓRIO: Apagar laudos velhos com erro")
     if st.button("🚨 ZERAR BANCO DE DADOS ANTIGO PARA RE-UPLOAD", type="secondary"):
         if supabase:
             supabase.table("laudos_sos").delete().neq("controle_lab", "X_INVALIDO").execute()
             st.cache_data.clear()
-            st.success("✅ O BANCO FOI ZERADO! Agora faça o upload dos PDFs abaixo.")
+            st.success("✅ O BANCO FOI ZERADO! Faça o upload dos PDFs abaixo.")
             st.rerun()
 
     st.markdown("---")
@@ -676,5 +674,5 @@ elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
             
             sucesso = salvar_laudos_supabase(df_novos)
             if sucesso:
-                st.success(f"✅ {len(df_novos)} laudos processados sem erros e salvos no Supabase!")
+                st.success(f"✅ {len(df_novos)} laudos extraídos e salvos!")
                 st.dataframe(df_novos, use_container_width=True)
