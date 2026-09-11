@@ -26,7 +26,6 @@ if "filtro_frota_grafico" not in st.session_state: st.session_state.filtro_frota
 if "filtro_status_grafico" not in st.session_state: st.session_state.filtro_status_grafico = []
 if "filtro_comp_grafico" not in st.session_state: st.session_state.filtro_comp_grafico = []
 
-# Função de Renderização Segura (Evita tela em branco em versões antigas do Streamlit)
 def renderizar_grafico_seguro(fig, **kwargs):
     if "on_select" in inspect.signature(st.plotly_chart).parameters:
         return st.plotly_chart(fig, **kwargs)
@@ -131,11 +130,44 @@ def salvar_laudos_supabase(df_novos):
         st.error(f"Erro ao salvar no Supabase: {e}")
         return False
 
+def salvar_5w2h_supabase(df_5w2h):
+    if not supabase or df_5w2h.empty: return False
+    try:
+        df_p = df_5w2h.rename(columns={
+            "Nº Controle Lab": "controle_lab", "Data Registro": "data_registro",
+            "Frota": "frota", "Modelo": "modelo", "Compartimento": "compartimento",
+            "Status Amostra": "status_amostra", "O Que (What)": "what", "Por Que (Why)": "why",
+            "Onde (Where)": "where", "Quando / Prazo (When)": "when_prazo",
+            "Quem / Responsável (Who)": "who_resp", "E-mail Responsável": "email_resp",
+            "Como (How)": "how", "Quanto Custa (How Much)": "how_much",
+            "Status Execução": "status_execucao", "Histórico de Alterações": "historico"
+        })
+        if "id" in df_p.columns: df_p = df_p.drop(columns=["id"])
+        registros = df_p.to_dict(orient="records")
+        supabase.table("plano_5w2h").insert(registros).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar 5W2H: {e}")
+        return False
+
+def atualizar_5w2h_status_prazo(controle_lab, novo_status, novo_prazo, historico_atualizado):
+    if not supabase: return False
+    try:
+        payload = {"status_execucao": novo_status, "historico": historico_atualizado}
+        if novo_prazo: payload["when_prazo"] = novo_prazo
+        supabase.table("plano_5w2h").update(payload).eq("controle_lab", controle_lab).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar plano: {e}")
+        return False
+
 df_base = carregar_dados_base()
 df_5w2h = carregar_plano_5w2h()
 
 # ==============================================================================
-# PARSER DE EXTRAÇÃO (CORRIGIDO OCR ZERO E HORÍMETROS)
+# PARSER BLINDADO (CORREÇÃO DE OCR NO NÚMERO DE CONTROLE)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -146,7 +178,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     texto_upper = texto.upper()
     texto_topo = texto_upper[:2000]
 
-    # Modelo Exato
+    # Modelo
     mod_txt = re.search(r'MODELO[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
     if mod_txt and mod_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO", ""]:
         modelo = mod_txt.group(1).strip().upper()
@@ -162,10 +194,11 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         frota_match = re.search(r'#([A-Z0-9]+)_', filename_upper)
         frota = frota_match.group(1).strip().upper() if frota_match and frota_match.group(1).strip().upper() not in ["N", "LOCAL"] else "Desconhecido"
 
-    # Controle e Miolo Numérico (Evita erro do OCR "0060" vs "U060")
-    ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
-    controle = ctrl_m.group(0) if ctrl_m else f"TEMP_{filename}"
-    core_ctrl = controle[1:] if ctrl_m else controle  # Pega "060-56075-0631"
+    # Controle (Extrai o núcleo numérico para burlar o erro de OCR da Sotreq: "0060" vs "U060")
+    ctrl_m = re.search(r'\d{3}-\d{5}-\d{4}', texto)
+    core_ctrl = ctrl_m.group(0) if ctrl_m else "000-00000-0000"
+    controle = f"U{core_ctrl}" if ctrl_m else f"TEMP_{filename}"
+    sufixo_ctrl = core_ctrl.split("-")[-1]
 
     # Compartimento
     mapa_comp = {
@@ -179,7 +212,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
             compartimento = v
             break
 
-    # Status Seguro
+    # Status Seguro pela tag do arquivo
     if "_AR.PDF" in filename_upper: status = "Crítico"
     elif "_MC.PDF" in filename_upper: status = "Monitorar"
     elif "_NAR.PDF" in filename_upper: status = "Normal"
@@ -188,67 +221,64 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         elif "MONITORAR" in texto_topo or "ATENÇÃO" in texto_topo or "ATENCAO" in texto_topo: status = "Monitorar"
         else: status = "Normal"
 
-    # Data Coleta
     data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
     data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d-%b-%Y")
 
-    # Horímetros (Extração ancorada na tabela do PDF para evitar falsos positivos)
-    hr_equip, hr_oleo = 0.0, 0.0
-    linhas = texto.split('\n')
-    for i, linha in enumerate(linhas):
-        if core_ctrl in linha:
-            bloco_horas = " ".join(linhas[i:i+4])
-            horas = re.findall(r'(\d+[\.,]?\d*)\s*(?:HR|KM)', bloco_horas, re.IGNORECASE)
-            if len(horas) >= 1: hr_equip = float(horas[0].replace(',', '.'))
-            if len(horas) >= 2: hr_oleo = float(horas[1].replace(',', '.'))
-            break # Trava na primeira ocorrência superior
-
-    # Elementos Químicos e Físicos
     elementos = {
         "Cu":0.0,"Fe":0.0,"Cr":0.0,"Al":0.0,"Pb":0.0,"Sn":0.0,"Si":0.0,"Na":0.0,"K":0.0,"B":0.0,"Mo":0.0,"Ni":0.0,"Ag":0.0,"Ti":0.0,"V":0.0,"Mn":0.0,"Ca":0.0,"Mg":0.0,"Zn":0.0,"P":0.0,"Ba":0.0,
         "V100":0.0,"H2O":0.0,"ISO4406_4u":0.0,"ISO4406_6u":0.0,"ISO4406_14u":0.0,
         "OXI":0.0,"NIT":0.0,"SUL":0.0,"W":"","TAN":0.0, "ISO_10u":0.0, "ISO_18u":0.0, "ISO_21u":0.0, "ISO_38u":0.0, "ISO_50u":0.0
     }
 
+    hr_equip, hr_oleo = 0.0, 0.0
+    linhas = texto.split('\n')
+    
+    # Mapeia todas as linhas onde o código "core" da amostra aparece
+    idx_linhas = [i for i, l in enumerate(linhas) if core_ctrl in l]
     elementos_encontrados = False
-    ocorrencias_ctrl = 0
-    for i, linha in enumerate(linhas):
-        if core_ctrl in linha:
-            ocorrencias_ctrl += 1
-            bloco_texto = " ".join(linhas[i:i+3])
-            bloco_limpo = re.sub(r'[A-Za-z0-9]?\d{3}-\d{5}-\d{4}', ' ', bloco_texto)
+
+    for idx in idx_linhas:
+        # Aumenta a margem de leitura para 8 linhas para garantir captura completa de tabelas com quebra
+        bloco_texto = " ".join(linhas[idx : idx+8])
+        
+        # Leitura dos Horímetros
+        horas = re.findall(r'(\d+[\.,]?\d*)\s*(?:HR|KM)', bloco_texto, re.IGNORECASE)
+        if len(horas) >= 1 and hr_equip == 0.0: hr_equip = float(horas[0].replace(',', '.'))
+        if len(horas) >= 2 and hr_oleo == 0.0: hr_oleo = float(horas[1].replace(',', '.'))
+        
+        # Limpa o número de controle para não ser capturado erroneamente como um metal
+        bloco_limpo = re.sub(r'[A-Za-z0-9]?\d{3}-\d{5}-\d{4}', ' ', bloco_texto)
+        bloco_limpo = re.sub(rf'\b{sufixo_ctrl}\b', ' ', bloco_limpo)
+        
+        nums = [float(n) for n in re.findall(r'\b\d+\b', bloco_limpo)]
+        nums_filtrados = [n for n in nums if n < 50000] # Elimina números irreais do OCR
+        
+        # Extração Tabela de Metais (21 Elementos)
+        if len(nums_filtrados) >= 20 and not elementos_encontrados:
+            keys_elem = ["Cu","Fe","Cr","Al","Pb","Sn","Si","Na","K","B","Mo","Ni","Ag","Ti","V","Mn","Ca","Mg","Zn","P","Ba"]
+            for i_elem, k in enumerate(keys_elem):
+                if i_elem < len(nums_filtrados): elementos[k] = nums_filtrados[i_elem]
+            elementos_encontrados = True
             
-            # Tabela de Desgaste (Ocorrência 1)
-            if ocorrencias_ctrl == 1 and not elementos_encontrados:
-                nums = [float(n) for n in re.findall(r'\b\d+\b', bloco_limpo)]
-                nums_filtrados = [n for n in nums if n < 50000] # Limpa sujeira de OCR
-                if len(nums_filtrados) >= 20:
-                    keys_elem = ["Cu","Fe","Cr","Al","Pb","Sn","Si","Na","K","B","Mo","Ni","Ag","Ti","V","Mn","Ca","Mg","Zn","P","Ba"]
-                    for idx, k in enumerate(keys_elem):
-                        if idx < len(nums_filtrados): elementos[k] = nums_filtrados[idx]
-                    elementos_encontrados = True
+        # Extração Tabela de Condições
+        elif 3 <= len(nums_filtrados) < 20:
+            w_match = re.search(r'\b([NPT])\b', bloco_limpo)
+            if w_match: elementos["W"] = w_match.group(1)
+            
+            if len(nums_filtrados) >= 3:
+                offset = 1 if "ST " in texto_upper else 0
+                if len(nums_filtrados) > offset + 2:
+                    elementos["OXI"] = nums_filtrados[offset]
+                    elementos["NIT"] = nums_filtrados[offset+1]
+                    elementos["SUL"] = nums_filtrados[offset+2]
 
-            # Tabela de Condições (Ocorrência 2)
-            elif ocorrencias_ctrl == 2:
-                w_match = re.search(r'\b([NPT])\b', bloco_limpo)
-                if w_match: elementos["W"] = w_match.group(1)
-                nums_cond = [float(n) for n in re.findall(r'\b\d+[\.,]?\d*\b', bloco_limpo)]
-                if len(nums_cond) >= 3:
-                    elementos["OXI"] = nums_cond[1] if len(nums_cond) > 1 else 0
-                    elementos["NIT"] = nums_cond[2] if len(nums_cond) > 2 else 0
-                    elementos["SUL"] = nums_cond[3] if len(nums_cond) > 3 else 0
-
-    match_v100 = re.search(r'V100\s*([0-9]{2,3}\.[0-9]{1,2})', texto)
+    # V100 e H2O independentes
+    match_v100 = re.search(r'(?:V100|Viscosidade)[^\d]*([0-9]{2,3}\.[0-9]{1,2})', texto, re.IGNORECASE)
+    if not match_v100: match_v100 = re.search(r'\b([0-9]{2,3}\.[0-9]{1,2})\b', texto)
     if match_v100: elementos["V100"] = float(match_v100.group(1))
 
-    match_h2o = re.search(r'H2O\s*([0-9]\.[0-9]{2,4})', texto)
+    match_h2o = re.search(r'H2O[^\d]*([0-9]\.[0-9]{2,4})', texto, re.IGNORECASE)
     if match_h2o: elementos["H2O"] = float(match_h2o.group(1))
-
-    iso_m = re.search(r'(\d{1,2})/(\d{1,2})/(\d{1,2})', texto)
-    if iso_m:
-        elementos["ISO4406_4u"] = float(iso_m.group(1))
-        elementos["ISO4406_6u"] = float(iso_m.group(2))
-        elementos["ISO4406_14u"] = float(iso_m.group(3))
 
     dados_finais = {
         "Data da Coleta": data_coleta, "Cliente": "3 SKAVAMINAS", "Modelo": modelo, "Frota": frota,
@@ -259,7 +289,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# MENU LATERAL E FILTROS MÚLTIPLOS
+# MENU LATERAL E FILTROS MÚLTIPLOS (CROSS-FILTERING)
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
@@ -318,6 +348,7 @@ opcao_menu = st.sidebar.radio(
         "🔬 Distribuição Estatística e Alarmes", 
         "🔥 Análise de Correlação (Spearman)",
         "📉 Curva de Sobrevivência (Weibull)", 
+        "🔍 RCA & Gestão do Plano 5W2H", 
         "📥 Importar Novos Laudos (PDF)"
     ]
 )
@@ -326,7 +357,7 @@ opcao_menu = st.sidebar.radio(
 # MÓDULOS DE VISUALIZAÇÃO
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral Interativo":
-    st.title("🚜 Dashboard Proativo de Análises de Óleo (Interativo)")
+    st.title("🚜 Dashboard Proativo de Análises de Óleo")
     
     if df_filtrado.empty:
         st.info("💡 Nenhuma análise encontrada com os filtros atuais.")
@@ -342,7 +373,7 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
             if "Status" in df_filtrado.columns:
                 fig_status = px.bar(
                     df_filtrado["Status"].value_counts().reset_index(), 
-                    x='Status', y='count', title="Distribuição de Criticidade", 
+                    x='Status', y='count', title="Distribuição de Criticidade (Selecione a barra)", 
                     text_auto=True, color='Status',
                     color_discrete_map={"Normal": "#10B981", "Monitorar": "#F59E0B", "Crítico": "#EF4444"}
                 )
@@ -353,7 +384,7 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
                     
         with col2:
             if "Compartimento" in df_filtrado.columns:
-                fig_comp = px.pie(df_filtrado, names="Compartimento", title="Amostras por Compartimento", hole=0.4)
+                fig_comp = px.pie(df_filtrado, names="Compartimento", title="Amostras por Compartimento (Selecione a fatia)", hole=0.4)
                 fig_comp.update_traces(textinfo='percent+label')
                 evento = renderizar_grafico_seguro(fig_comp, use_container_width=True, on_select="rerun")
                 if evento and "selection" in evento and evento["selection"]["points"]:
@@ -499,10 +530,75 @@ elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
         else:
             st.warning("⚠️ Não há dados suficientes (mínimo de 3 registros válidos ÚNICOS de Horímetro do Óleo > 0).")
 
+elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
+    st.title("🔍 RCA & Gestão de Ações 5W2H")
+    tab1, tab2 = st.tabs(["📌 Criar Novo Plano 5W2H", "🔄 Reprogramar / Atualizar Status"])
+    
+    with tab1:
+        st.dataframe(df_filtrado, use_container_width=True)
+        if not df_filtrado.empty and "Nº Controle Lab" in df_filtrado.columns:
+            amostras_opcoes = df_filtrado["Nº Controle Lab"].tolist()
+            controle_sel = st.selectbox("Selecione a Amostra para Tratar:", amostras_opcoes)
+            linha_amostra = df_filtrado[df_filtrado["Nº Controle Lab"] == controle_sel].iloc[0]
+
+            with st.form("form_5w2h_novo"):
+                f1, f2 = st.columns(2)
+                what = f1.text_input("O Que Fazer (What):", value=f"Inspecionar {linha_amostra.get('Compartimento', '')}")
+                why = f2.text_input("Por Que Fazer (Why):", value=f"Amostra {linha_amostra.get('Status', '')}")
+                f3, f4, f5 = st.columns(3)
+                where = f3.text_input("Onde (Where):", value=f"Frota {linha_amostra.get('Frota', '')}")
+                when = f4.date_input("Prazo Limite (When):")
+                who = f5.text_input("Responsável (Who):")
+                f6, f7, f8 = st.columns(3)
+                email_resp = f6.text_input("E-mail do Responsável:")
+                how = f7.text_input("Como Fazer (How):")
+                cost = f8.text_input("Custo (How Much):", value="R$ 0,00")
+                
+                if st.form_submit_button("🚨 REGISTRAR PLANO 5W2H NO SUPABASE"):
+                    novo_reg = {
+                        "Data Registro": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                        "Nº Controle Lab": controle_sel,
+                        "Frota": linha_amostra.get('Frota', ''), "Modelo": linha_amostra.get('Modelo', ''),
+                        "Compartimento": linha_amostra.get('Compartimento', ''), "Status Amostra": linha_amostra.get('Status', ''),
+                        "O Que (What)": what, "Por Que (Why)": why, "Onde (Where)": where,
+                        "Quando / Prazo (When)": when.strftime("%d/%m/%Y"),
+                        "Quem / Responsável (Who)": who, "E-mail Responsável": email_resp,
+                        "Como (How)": how, "Quanto Custa (How Much)": cost,
+                        "Status Execução": "Em Andamento", "Histórico de Alterações": f"Criado em {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                    }
+                    salvar_5w2h_supabase(pd.DataFrame([novo_reg]))
+                    st.success("✅ Plano gravado no banco de dados!")
+
+    with tab2:
+        if not df_5w2h.empty and "Nº Controle Lab" in df_5w2h.columns:
+            planos_ids = df_5w2h["Nº Controle Lab"].tolist()
+            plano_sel_id = st.selectbox("Selecione o Plano 5W2H para Modificar:", planos_ids)
+            linha_plano = df_5w2h[df_5w2h["Nº Controle Lab"] == plano_sel_id].iloc[0]
+            
+            c_s1, c_s2 = st.columns(2)
+            novo_status_exec = c_s1.selectbox("Status da Ação:", ["Em Andamento", "Concluído", "Atrasado", "Reprogramado"])
+            motivo_justificativa = c_s2.text_input("Motivo da Alteração / Observação:")
+            
+            novo_prazo_str = None
+            if novo_status_exec in ["Atrasado", "Reprogramado"]:
+                novo_prazo_dt = st.date_input("Nova Data / Prazo Limite (When):")
+                novo_prazo_str = novo_prazo_dt.strftime("%d/%m/%Y")
+            
+            if st.button("🔄 SALVAR ALTERAÇÃO NO SUPABASE", type="primary"):
+                hist_ant = str(linha_plano.get("Histórico de Alterações", ""))
+                sub_prazo = f" -> Novo Prazo: {novo_prazo_str}" if novo_prazo_str else ""
+                novo_hist = f"{hist_ant} | [{datetime.now().strftime('%d/%m/%Y %H:%M')}] Status -> {novo_status_exec}{sub_prazo} (Motivo: {motivo_justificativa})"
+                
+                sucesso_up = atualizar_5w2h_status_prazo(plano_sel_id, novo_status_exec, novo_prazo_str, novo_hist)
+                if sucesso_up:
+                    st.success("✅ Plano reprogramado no Supabase!")
+                    st.rerun()
+        st.dataframe(df_5w2h, use_container_width=True)
+
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
     st.title("📥 Ingestão de Laudos e Correção Definitiva da Base")
     
-    st.subheader("⚠️ LIMPEZA DO BANCO DE DADOS")
+    st.subheader("⚠️ LIMPEZA DO BANCO DE DADOS (Zerar Erros)")
     if st.button("🚨 ZERAR BANCO DE DADOS ANTIGO PARA RE-UPLOAD", type="secondary"):
         if supabase:
             supabase.table("laudos_sos").delete().neq("controle_lab", "X_INVALIDO").execute()
