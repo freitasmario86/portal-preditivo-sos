@@ -47,7 +47,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# PERSISTÊNCIA DE DADOS (SUPABASE COM TODAS AS COLUNAS)
+# PERSISTÊNCIA DE DADOS
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -105,15 +105,6 @@ def carregar_plano_5w2h():
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=5)
-def carregar_limites_modelos():
-    if not supabase: return pd.DataFrame()
-    try:
-        res = supabase.table("limites_modelos").select("*").execute()
-        return pd.DataFrame(res.data)
-    except Exception:
-        return pd.DataFrame()
-
 def salvar_laudos_supabase(df_novos):
     if not supabase or df_novos.empty: return False
     try:
@@ -143,17 +134,6 @@ def salvar_laudos_supabase(df_novos):
         return True
     except Exception as e:
         st.error(f"Erro ao salvar no Supabase: {e}")
-        return False
-
-def salvar_limites_modelos_supabase(df_limites):
-    if not supabase or df_limites.empty: return False
-    try:
-        registros = df_limites.to_dict(orient="records")
-        supabase.table("limites_modelos").upsert(registros).execute()
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao salvar limites: {e}")
         return False
 
 def salvar_5w2h_supabase(df_5w2h):
@@ -191,7 +171,6 @@ def atualizar_5w2h_status_prazo(controle_lab, novo_status, novo_prazo, historico
 
 df_base = carregar_dados_base()
 df_5w2h = carregar_plano_5w2h()
-df_limites = carregar_limites_modelos()
 
 # ==============================================================================
 # LENTE OCR DE ALTA PRECISÃO (HORÍMETROS E METAIS)
@@ -305,7 +284,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     return dados_finais
 
 # ==============================================================================
-# RELATÓRIO EXECUTIVO EM PDF (INCLUI BAD ACTORS E ALARMES)
+# RELATÓRIO EXECUTIVO EM PDF
 # ==============================================================================
 def gerar_relatorio_pdf_executivo(df_dados):
     buffer = BytesIO()
@@ -345,7 +324,7 @@ def gerar_relatorio_pdf_executivo(df_dados):
     return buffer
 
 # ==============================================================================
-# MENU LATERAL E FILTROS MÚLTIPLOS (CROSS-FILTERING SEGURO)
+# MENU LATERAL E FILTROS MÚLTIPLOS
 # ==============================================================================
 st.sidebar.title("🛠️ Painel de Controle")
 
@@ -413,7 +392,6 @@ opcao_menu = st.sidebar.radio(
         "🔥 Análise de Correlação (Spearman)",
         "📉 Curva de Sobrevivência (Weibull)", 
         "🔍 RCA & Gestão do Plano 5W2H", 
-        "⚙️ Parametrização de Limites",
         "📥 Importar Novos Laudos (PDF)"
     ]
 )
@@ -422,7 +400,7 @@ opcao_menu = st.sidebar.radio(
 # MÓDULOS DE VISUALIZAÇÃO
 # ==============================================================================
 if opcao_menu == "📊 Dashboard Geral Interativo":
-    st.title("🚜 Dashboard Proativo de Análises de Óleo (Interativo)")
+    st.title("🚜 Dashboard Proativo de Análises de Óleo")
     
     if df_filtrado.empty:
         st.info("💡 Nenhuma análise encontrada com os filtros atuais.")
@@ -438,7 +416,7 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
             if "Status" in df_filtrado.columns:
                 fig_status = px.bar(
                     df_filtrado["Status"].value_counts().reset_index(), 
-                    x='Status', y='count', title="Distribuição de Criticidade", 
+                    x='Status', y='count', title="Distribuição de Criticidade (Selecione a barra)", 
                     text_auto=True, color='Status',
                     color_discrete_map={"Normal": "#10B981", "Monitorar": "#F59E0B", "Crítico": "#EF4444"}
                 )
@@ -481,13 +459,10 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
 elif opcao_menu == "📈 Séries Temporais & Variação":
     st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
     if not df_filtrado.empty and "Data_Convertida" in df_filtrado.columns:
-        
         df_temp = df_filtrado.sort_values(by=["Modelo", "Frota", "Data_Convertida"]).dropna(subset=['Data_Convertida'])
-        
         if not df_temp.empty:
             cols_numericas = ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "Horímetro Óleo", "Horímetro Equip", "OXI", "NIT", "SUL"]
             param_var = st.selectbox("Selecione o Parâmetro:", cols_numericas)
-            
             df_media_modelo = df_temp.groupby(["Modelo", "Data_Convertida"])[param_var].mean().reset_index()
 
             fig_temp = px.line(df_temp, x="Data_Convertida", y=param_var, color="Frota", markers=True)
@@ -500,9 +475,7 @@ elif opcao_menu == "📈 Séries Temporais & Variação":
                     mode='lines', name=f'Média {mod}',
                     line=dict(dash='dash', width=3, color='black')
                 ))
-            
             renderizar_grafico_seguro(fig_temp, use_container_width=True)
-            st.dataframe(df_temp.drop(columns=['Data_Convertida']), use_container_width=True)
 
 elif opcao_menu == "🚨 Ranking de Bad Actors":
     st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
@@ -553,7 +526,6 @@ elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
             k1.metric(f"Média Populacional $\mu$ ({comp_sel})", f"{m_global:.1f}")
             k2.metric(f"Desvio Padrão $\sigma$", f"{std_global:.1f}")
 
-            # Gráfico Simples Azul com Linhas de Alarme
             fig_limpo = px.histogram(df_comp_todos, x=param, title=f"Distribuição de {param} ({comp_sel})", text_auto=True, opacity=0.8, color_discrete_sequence=['#3b82f6'])
             fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black", annotation_text=f"$\mu$: {m_global:.1f}")
             fig_limpo.add_vline(x=m_global + std_global, line_dash="dot", line_color="#F59E0B", annotation_text="Alerta ($> \mu+1\sigma$)")
@@ -577,6 +549,18 @@ elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
 
 elif opcao_menu == "🔥 Análise de Correlação (Spearman)":
     st.title("🔥 Análise de Extensão da Vida do Óleo (Correlação de Spearman)")
+
+    with st.expander("📖 Como funciona e como analisar esta ferramenta?", expanded=False):
+        st.markdown("""
+        **O que é?**
+        Esta matriz utiliza o Coeficiente de Correlação de Spearman para medir a força e a direção da relação entre o envelhecimento do óleo (Horímetro Óleo) e os marcadores de desgaste, contaminação e degradação.
+        
+        **Como realizar a análise:**
+        * **Valores próximos a 1 ou -1:** Indicam forte relação. Ex: Se o `Horímetro Óleo` tem alta correlação com `Fe`, significa que o desgaste aumenta previsivelmente com o tempo.
+        * **Extensão de Vida Útil:** O foco recai sobre a **Viscosidade (V100)** e propriedades de degradação. Se a correlação deles com o horímetro mostrar uma tendência controlada, a estratégia de estender a troca em 20% (ex: de 500h para 600h) pode ser aplicada sem riscos substanciais.
+        * **Gatilhos:** Cores quentes (vermelho) indicam correlação positiva (crescem juntos), cores frias (azul) indicam correlação negativa.
+        """)
+
     if not df_filtrado.empty:
         col_corr = ["Horímetro Óleo", "V100", "Fe", "Cu", "Si", "Al", "Cr", "H2O", "OXI", "NIT", "SUL"]
         col_existentes = [c for c in col_corr if c in df_filtrado.columns]
@@ -592,6 +576,18 @@ elif opcao_menu == "🔥 Análise de Correlação (Spearman)":
 
 elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
     st.title("📉 Curva de Sobrevivência (Weibull) com Cursor Móvel")
+
+    with st.expander("📖 Como funciona e como analisar esta ferramenta?", expanded=False):
+        st.markdown("""
+        **O que é?**
+        A Análise de Weibull traça a Curva de Confiabilidade $R(t)$, que estima a probabilidade de o lubrificante (ou componente mecânico) "sobreviver" (não falhar ou não atingir níveis críticos) até um determinado número de horas.
+        
+        **Como realizar a análise:**
+        * **Eixo X (Horímetro Óleo):** Representa o tempo de uso do lubrificante ou componente.
+        * **Eixo Y (Confiabilidade R(t)):** Representa a chance percentual de sucesso operacional.
+        * **Interpretação:** Passe o mouse sobre a linha. Se a curva cair drasticamente cedo, indica falha prematura ou degradação rápida. Se a curva se mantiver alta e cair suavemente, demonstra que o óleo suporta maiores intervalos com segurança. Ideal para cruzar com a matriz de Spearman.
+        """)
+
     if not df_filtrado.empty and "Horímetro Óleo" in df_filtrado.columns:
         s_horas = pd.to_numeric(df_filtrado["Horímetro Óleo"], errors='coerce').dropna()
         horas = np.unique(np.sort(s_horas[s_horas > 0].values))
@@ -612,7 +608,7 @@ elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
             except Exception:
                 st.warning("⚠️ Regressão matemática inválida. Os horímetros lidos estão zerados ou corrompidos.")
         else:
-            st.warning("⚠️ Não há dados suficientes (mínimo de 3 registros válidos ÚNICOS de Horímetro do Óleo > 0). Verifique se o banco de dados foi repovoado com os novos horímetros.")
+            st.warning("⚠️ Não há dados suficientes (mínimo de 3 registros válidos ÚNICOS de Horímetro do Óleo > 0). Zere a base e refaça o upload dos arquivos.")
 
 elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
     st.title("🔍 RCA & Gestão de Ações 5W2H")
@@ -673,33 +669,6 @@ elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
                 if atualizar_5w2h_status_prazo(plano_sel_id, novo_status_exec, novo_prazo_str, novo_hist):
                     st.success("✅ Plano reprogramado no Supabase!")
                     st.rerun()
-
-elif opcao_menu == "⚙️ Parametrização de Limites":
-    st.title("⚙️ Parametrização de Limites Máximos em Massa por Modelo")
-    tab1, tab2 = st.tabs(["✍️ Tabela Interativa Editável", "📥 Upload via Excel/CSV"])
-    
-    with tab1:
-        df_para_edicao = df_limites.copy() if not df_limites.empty else pd.DataFrame(columns=["modelo", "fe_max", "cu_max", "si_max", "al_max", "cr_max", "v100_min", "v100_max"])
-        df_editado = st.data_editor(df_para_edicao, num_rows="dynamic", use_container_width=True)
-        if st.button("💾 Salvar Alterações na Base", type="primary"):
-            if salvar_limites_modelos_supabase(df_editado):
-                st.success("✅ Limites atualizados no banco de dados!")
-                st.rerun()
-
-    with tab2:
-        df_template = pd.DataFrame(columns=["modelo", "fe_max", "cu_max", "si_max", "al_max", "cr_max", "v100_min", "v100_max"])
-        csv_template = df_template.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Baixar Tabela Modelo (CSV)", data=csv_template, file_name='template_limites_modelos.csv', mime='text/csv')
-        uploaded_limites = st.file_uploader("Faça o Upload do Arquivo de Limites Preenchido", type=["csv", "xlsx"])
-        if uploaded_limites:
-            try:
-                df_up_lim = pd.read_csv(uploaded_limites) if uploaded_limites.name.endswith('.csv') else pd.read_excel(uploaded_limites)
-                if st.button("🚀 Gravar Planilha no Supabase", type="primary"):
-                    if salvar_limites_modelos_supabase(df_up_lim):
-                        st.success("✅ Planilha salva com sucesso no Supabase!")
-                        st.rerun()
-            except Exception as e:
-                st.error(f"Erro na planilha: {e}")
 
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
     st.title("📥 Ingestão de Laudos e Correção Definitiva da Base")
