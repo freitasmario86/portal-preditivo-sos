@@ -25,7 +25,6 @@ st.set_page_config(
 
 URL_PASTA_DRIVE = "https://drive.google.com/drive/u/0/folders/19neodq1Ug0MJDd4mnqyBiWWmTQGuP_sw"
 
-# Estados para Cross-Filtering
 if "filtro_frota_grafico" not in st.session_state: st.session_state.filtro_frota_grafico = []
 if "filtro_status_grafico" not in st.session_state: st.session_state.filtro_status_grafico = []
 if "filtro_comp_grafico" not in st.session_state: st.session_state.filtro_comp_grafico = []
@@ -43,7 +42,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 # ==============================================================================
-# CARREGAMENTO E PERSISTÊNCIA DE DADOS
+# PERSISTÊNCIA DE DADOS (SUPABASE)
 # ==============================================================================
 @st.cache_data(ttl=5)
 def carregar_dados_base():
@@ -75,6 +74,26 @@ def carregar_dados_base():
         return df
     except Exception as e:
         st.warning(f"Aviso na leitura de laudos: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=5)
+def carregar_plano_5w2h():
+    if not supabase: return pd.DataFrame()
+    try:
+        res = supabase.table("plano_5w2h").select("*").execute()
+        df = pd.DataFrame(res.data)
+        if not df.empty:
+            df = df.rename(columns={
+                "controle_lab": "Nº Controle Lab", "data_registro": "Data Registro",
+                "frota": "Frota", "modelo": "Modelo", "compartimento": "Compartimento",
+                "status_amostra": "Status Amostra", "what": "O Que (What)", "why": "Por Que (Why)",
+                "where": "Onde (Where)", "when_prazo": "Quando / Prazo (When)",
+                "who_resp": "Quem / Responsável (Who)", "email_resp": "E-mail Responsável",
+                "how": "Como (How)", "how_much": "Quanto Custa (How Much)",
+                "status_execucao": "Status Execução", "historico": "Histórico de Alterações"
+            })
+        return df
+    except Exception:
         return pd.DataFrame()
 
 @st.cache_data(ttl=5)
@@ -122,11 +141,45 @@ def salvar_limites_modelos_supabase(df_limites):
         st.error(f"Erro ao salvar limites: {e}")
         return False
 
+def salvar_5w2h_supabase(df_5w2h):
+    if not supabase or df_5w2h.empty: return False
+    try:
+        df_p = df_5w2h.rename(columns={
+            "Nº Controle Lab": "controle_lab", "Data Registro": "data_registro",
+            "Frota": "frota", "Modelo": "modelo", "Compartimento": "compartimento",
+            "Status Amostra": "status_amostra", "O Que (What)": "what", "Por Que (Why)": "why",
+            "Onde (Where)": "where", "Quando / Prazo (When)": "when_prazo",
+            "Quem / Responsável (Who)": "who_resp", "E-mail Responsável": "email_resp",
+            "Como (How)": "how", "Quanto Custa (How Much)": "how_much",
+            "Status Execução": "status_execucao", "Histórico de Alterações": "historico"
+        })
+        if "id" in df_p.columns: df_p = df_p.drop(columns=["id"])
+        registros = df_p.to_dict(orient="records")
+        supabase.table("plano_5w2h").insert(registros).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar 5W2H: {e}")
+        return False
+
+def atualizar_5w2h_status_prazo(controle_lab, novo_status, novo_prazo, historico_atualizado):
+    if not supabase: return False
+    try:
+        payload = {"status_execucao": novo_status, "historico": historico_atualizado}
+        if novo_prazo: payload["when_prazo"] = novo_prazo
+        supabase.table("plano_5w2h").update(payload).eq("controle_lab", controle_lab).execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar plano: {e}")
+        return False
+
 df_base = carregar_dados_base()
 df_limites = carregar_limites_modelos()
+df_5w2h = carregar_plano_5w2h()
 
 # ==============================================================================
-# PARSER DE EXTRAÇÃO (MANTIDO INTACTO)
+# PARSER BLINDADO (CORREÇÃO DOS HORÍMETROS ZERADOS)
 # ==============================================================================
 def extrair_dados_pdf_fidedigno(file_bytes, filename):
     reader = pypdf.PdfReader(file_bytes)
@@ -137,6 +190,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
     texto_upper = texto.upper()
     texto_topo = texto_upper[:1500]
 
+    # Modelo
     mod_txt = re.search(r'MODELO[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
     if mod_txt and mod_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO"]:
         modelo = mod_txt.group(1).strip().upper()
@@ -144,6 +198,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         mod_fallback = re.search(r'\b(SY[0-9]+[A-Z]*|SKT[0-9]+[A-Z]*|CAT\s*[0-9]+[A-Z]*|3[0-9]{2}[A-Z]*|D[6-9][A-Z]*|7[0-9]{2}[A-Z]*|9[0-9]{2}[A-Z]*|1[2-6][0-9][A-Z]*)\b', texto_topo, re.IGNORECASE)
         modelo = mod_fallback.group(1).strip().upper().replace(" ", "") if mod_fallback else "Geral"
 
+    # Frota
     frota_txt = re.search(r'FROTA[\s:]+(?!DO\b)([A-Z0-9\-_]+)', texto, re.IGNORECASE)
     if frota_txt and frota_txt.group(1).strip().upper() not in ["N", "LOCAL", "DE", "DO", "DA", "EQUIPAMENTO"]:
         frota = frota_txt.group(1).strip().upper()
@@ -151,9 +206,11 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         frota_match = re.search(r'#([A-Z0-9]+)_', filename_upper)
         frota = frota_match.group(1).strip().upper() if frota_match and frota_match.group(1).strip().upper() not in ["N", "LOCAL"] else "Desconhecido"
 
+    # Controle
     ctrl_m = re.search(r'U\d{3}-\d{5}-\d{4}', texto)
     controle = ctrl_m.group(0) if ctrl_m else f"TEMP_{filename}"
 
+    # Compartimento
     mapa_comp = {
         'FD_LT': 'COMANDO F ESQ', 'FD_RT': 'COMANDO F DIR', 'SW_DR': 'COMANDO GIRO',
         'ENG': 'MOTOR', 'HS': 'SISTEMA HIDRAULICO', 'DIFF_FR': 'DIFERENCIAL DIANT',
@@ -165,6 +222,7 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
             compartimento = v
             break
 
+    # Status
     if "_AR.PDF" in filename_upper: status = "Crítico"
     elif "_MC.PDF" in filename_upper: status = "Monitorar"
     elif "_NAR.PDF" in filename_upper: status = "Normal"
@@ -173,15 +231,20 @@ def extrair_dados_pdf_fidedigno(file_bytes, filename):
         elif "MONITORAR" in texto_topo or "ATENÇÃO" in texto_topo or "ATENCAO" in texto_topo: status = "Monitorar"
         else: status = "Normal"
 
-    data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
-    data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d/%m/%Y")
+    # Data
+    data_match = re.search(r'DATA COLETA[^\d]*(\d{2}-[A-Za-z]{3}-\d{4})', texto, re.IGNORECASE)
+    if not data_match:
+        data_match = re.search(r'(\d{2}-[A-Za-z]{3}-\d{4})', texto)
+    data_coleta = data_match.group(1) if data_match else datetime.now().strftime("%d-%b-%Y")
 
-    hrs_equip_match = re.search(r'HRS/KM EQUIP\s*([0-9\.,]+)', texto)
+    # Horímetros (Corrigido para pular quebras de linha e ler o número)
+    hrs_equip_match = re.search(r'HRS/KM EQUIP[^\d]*(\d+[\.,]?\d*)', texto, re.IGNORECASE)
     hr_equip = float(hrs_equip_match.group(1).replace(',', '.')) if hrs_equip_match else 0.0
 
-    hrs_oleo_match = re.search(r'HRS/KM ÓLEO\s*([0-9\.,]+)', texto)
+    hrs_oleo_match = re.search(r'HRS/KM (?:ÓLEO|OLEO)[^\d]*(\d+[\.,]?\d*)', texto, re.IGNORECASE)
     hr_oleo = float(hrs_oleo_match.group(1).replace(',', '.')) if hrs_oleo_match else 0.0
 
+    # Extração de Metais
     elementos = {"Cu":0.0,"Fe":0.0,"Cr":0.0,"Al":0.0,"Pb":0.0,"Sn":0.0,"Si":0.0,"Na":0.0,"K":0.0,"B":0.0,"Mo":0.0,"Ni":0.0,"Ag":0.0,"Ti":0.0,"V":0.0,"Mn":0.0,"Ca":0.0,"Mg":0.0,"Zn":0.0,"P":0.0,"Ba":0.0,"V100":0.0,"H2O":0.0,"ISO4406_4u":0.0,"ISO4406_6u":0.0,"ISO4406_14u":0.0}
 
     linhas = texto.split('\n')
@@ -220,7 +283,6 @@ st.sidebar.title("🛠️ Painel de Controle")
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filtros Globais (Múltiplos)")
 
-# Utilização de multiselect para permitir a seleção de mais de um parâmetro
 opcoes_empresa = list(df_base["Cliente"].unique()) if not df_base.empty else []
 f_empresa = st.sidebar.multiselect("Empresa / Cliente:", opcoes_empresa)
 
@@ -236,7 +298,6 @@ f_comp = st.sidebar.multiselect("Compartimento Analisado:", opcoes_comp)
 opcoes_status = list(df_base["Status"].unique()) if not df_base.empty else []
 f_status = st.sidebar.multiselect("Status da Amostra:", opcoes_status)
 
-# Aplicação dos filtros do Menu (Lista Vazia = Todos)
 df_filtrado = df_base.copy()
 if not df_filtrado.empty:
     if f_empresa: df_filtrado = df_filtrado[df_filtrado["Cliente"].isin(f_empresa)]
@@ -245,7 +306,6 @@ if not df_filtrado.empty:
     if f_comp: df_filtrado = df_filtrado[df_filtrado["Compartimento"].isin(f_comp)]
     if f_status: df_filtrado = df_filtrado[df_filtrado["Status"].isin(f_status)]
 
-# Filtros Dinâmicos (Cliques nos Gráficos)
 filtros_dinamicos = []
 if st.session_state.filtro_frota_grafico:
     df_filtrado = df_filtrado[df_filtrado["Frota"].isin(st.session_state.filtro_frota_grafico)]
@@ -272,10 +332,11 @@ opcao_menu = st.sidebar.radio(
         "📊 Dashboard Geral Interativo", 
         "📈 Séries Temporais & Variação",
         "🚨 Ranking de Bad Actors", 
-        "🔬 Distribuição Estatística Alarms", 
+        "🔬 Distribuição Estatística e Alarmes", 
         "🔥 Análise de Correlação (Spearman)",
-        "⚙️ Parametrização de Limites",
         "📉 Curva de Sobrevivência (Weibull)", 
+        "🔍 RCA & Gestão do Plano 5W2H", 
+        "⚙️ Parametrização de Limites",
         "📥 Importar Novos Laudos (PDF)"
     ]
 )
@@ -327,11 +388,63 @@ if opcao_menu == "📊 Dashboard Geral Interativo":
             use_container_width=True
         )
 
-elif opcao_menu == "🔬 Distribuição Estatística Alarms":
+elif opcao_menu == "📈 Séries Temporais & Variação":
+    st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
+    if not df_filtrado.empty and "Data da Coleta" in df_filtrado.columns:
+        
+        # Conversão de Datas para eixo cronológico correto
+        df_temp = df_filtrado.copy()
+        df_temp['Data_Convertida'] = pd.to_datetime(df_temp['Data da Coleta'], errors='coerce')
+        df_temp = df_temp.sort_values(by=["Modelo", "Frota", "Data_Convertida"]).dropna(subset=['Data_Convertida'])
+        
+        if not df_temp.empty:
+            param_var = st.selectbox("Selecione o Parâmetro Químico:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O", "Horímetro Óleo", "Horímetro Equip"])
+            
+            df_media_modelo = df_temp.groupby(["Modelo", "Data_Convertida"])[param_var].mean().reset_index()
+
+            fig_temp = px.line(df_temp, x="Data_Convertida", y=param_var, color="Frota", markers=True)
+            fig_temp.update_xaxes(tickformat="%d/%m/%Y")
+            
+            for mod in df_temp["Modelo"].unique():
+                df_m = df_media_modelo[df_media_modelo["Modelo"] == mod]
+                fig_temp.add_trace(go.Scatter(
+                    x=df_m["Data_Convertida"], y=df_m[param_var],
+                    mode='lines', name=f'Média Modelo {mod}',
+                    line=dict(dash='dash', width=3, color='black')
+                ))
+            
+            st.plotly_chart(fig_temp, use_container_width=True)
+            st.dataframe(df_temp.drop(columns=['Data_Convertida']), use_container_width=True)
+        else:
+            st.warning("⚠️ Não foi possível converter as datas para ordenação.")
+
+elif opcao_menu == "🚨 Ranking de Bad Actors":
+    st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
+    if not df_filtrado.empty and "Status" in df_filtrado.columns:
+        criticos = df_filtrado[df_filtrado["Status"].isin(["Crítico", "Monitorar"])]
+        if not criticos.empty:
+            bad_actors = criticos.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
+            ordem = st.radio("Ordenação:", ["Maior para o Menor (Descendente)", "Menor para o Maior (Ascendente)"], horizontal=True)
+            asc = True if "Menor para o Maior" in ordem else False
+            totais_frota = bad_actors.groupby("Frota")["Ocorrências Críticas"].sum().sort_values(ascending=asc).index.tolist()
+
+            fig_bad = px.bar(
+                bad_actors, x="Frota", y="Ocorrências Críticas", color="Compartimento", text_auto=True
+            )
+            fig_bad.update_xaxes(categoryorder='array', categoryarray=totais_frota)
+            
+            evento_clique = st.plotly_chart(fig_bad, use_container_width=True, on_select="rerun")
+            if evento_clique and "selection" in evento_clique and evento_clique["selection"]["points"]:
+                pontos = [p["x"] for p in evento_clique["selection"]["points"]]
+                st.session_state.filtro_frota_grafico = pontos
+                st.rerun()
+
+            st.dataframe(bad_actors, use_container_width=True)
+
+elif opcao_menu == "🔬 Distribuição Estatística e Alarmes":
     st.title("🔬 Distribuição Estatística e Alarmes de Desgaste")
     st.markdown("Com base no Boletim Técnico 2023-0004, a distribuição estatística de metais define limites de Alerta ($\mu + 1\sigma$) e Crítico ($\mu + 2\sigma$) calculados a partir da população normal de equipamentos.")
     
-    # Avalia apenas Normais conforme regra estatística do boletim
     df_normais = df_filtrado[df_filtrado["Status"] == "Normal"].copy()
     
     if df_normais.empty:
@@ -358,7 +471,6 @@ elif opcao_menu == "🔬 Distribuição Estatística Alarms":
                     title=f"Limites Estatísticos de {param} ({comp_sel})", text_auto=True, opacity=0.75
                 )
                 
-                # Inserção das métricas baseadas no Boletim
                 fig_limpo.add_vline(x=m_global, line_dash="dash", line_color="black", annotation_text=f"Média ($\mu$): {m_global:.1f}")
                 fig_limpo.add_vline(x=m_global + std_global, line_dash="dot", line_color="#F59E0B", annotation_text=f"Alerta (> $\mu+1\sigma$)")
                 fig_limpo.add_vline(x=m_global + 2*std_global, line_dash="dot", line_color="#EF4444", annotation_text=f"Crítico (> $\mu+2\sigma$)")
@@ -385,7 +497,6 @@ elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
     st.title("📉 Curva de Sobrevivência (Weibull) com Cursor Móvel")
     if not df_filtrado.empty and "Horímetro Óleo" in df_filtrado.columns:
         s_horas = pd.to_numeric(df_filtrado["Horímetro Óleo"], errors='coerce').dropna()
-        # Filtra horas > 0 e remove duplicatas que quebram o cálculo de regressão (singular matrix)
         horas = np.unique(np.sort(s_horas[s_horas > 0].values))
         
         if len(horas) >= 3:
@@ -403,9 +514,74 @@ elif opcao_menu == "📉 Curva de Sobrevivência (Weibull)":
                 fig_w.update_layout(hovermode="x unified")
                 st.plotly_chart(fig_w, use_container_width=True)
             except Exception as e:
-                st.warning("⚠️ Impossível ajustar a curva matemática. Os valores informados de horímetro formam uma regressão inválida.")
+                st.warning("⚠️ Impossível ajustar a curva matemática. Os valores informados formam uma regressão inválida.")
         else:
-            st.warning("⚠️ Não há dados suficientes (mínimo de 3 registros válidos únicos de Horímetro do Óleo > 0) para traçar a Curva de Weibull. Ajuste seus filtros.")
+            st.warning("⚠️ Não há dados suficientes (mínimo de 3 registros válidos ÚNICOS de Horímetro do Óleo > 0) para traçar a Curva de Weibull. Ajuste seus filtros.")
+
+elif opcao_menu == "🔍 RCA & Gestão do Plano 5W2H":
+    st.title("🔍 RCA & Gestão de Ações 5W2H")
+    tab1, tab2 = st.tabs(["📌 Criar Novo Plano 5W2H", "🔄 Reprogramar / Atualizar Status"])
+    
+    with tab1:
+        st.dataframe(df_filtrado, use_container_width=True)
+        if not df_filtrado.empty and "Nº Controle Lab" in df_filtrado.columns:
+            amostras_opcoes = df_filtrado["Nº Controle Lab"].tolist()
+            controle_sel = st.selectbox("Selecione a Amostra para Tratar:", amostras_opcoes)
+            linha_amostra = df_filtrado[df_filtrado["Nº Controle Lab"] == controle_sel].iloc[0]
+
+            with st.form("form_5w2h_novo"):
+                f1, f2 = st.columns(2)
+                what = f1.text_input("O Que Fazer (What):", value=f"Inspecionar {linha_amostra.get('Compartimento', '')}")
+                why = f2.text_input("Por Que Fazer (Why):", value=f"Amostra {linha_amostra.get('Status', '')}")
+                f3, f4, f5 = st.columns(3)
+                where = f3.text_input("Onde (Where):", value=f"Frota {linha_amostra.get('Frota', '')}")
+                when = f4.date_input("Prazo Limite (When):")
+                who = f5.text_input("Responsável (Who):")
+                f6, f7, f8 = st.columns(3)
+                email_resp = f6.text_input("E-mail do Responsável:")
+                how = f7.text_input("Como Fazer (How):")
+                cost = f8.text_input("Custo (How Much):", value="R$ 0,00")
+                
+                if st.form_submit_button("🚨 REGISTRAR PLANO 5W2H NO SUPABASE"):
+                    novo_reg = {
+                        "Data Registro": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                        "Nº Controle Lab": controle_sel,
+                        "Frota": linha_amostra.get('Frota', ''), "Modelo": linha_amostra.get('Modelo', ''),
+                        "Compartimento": linha_amostra.get('Compartimento', ''), "Status Amostra": linha_amostra.get('Status', ''),
+                        "O Que (What)": what, "Por Que (Why)": why, "Onde (Where)": where,
+                        "Quando / Prazo (When)": when.strftime("%d/%m/%Y"),
+                        "Quem / Responsável (Who)": who, "E-mail Responsável": email_resp,
+                        "Como (How)": how, "Quanto Custa (How Much)": cost,
+                        "Status Execução": "Em Andamento", "Histórico de Alterações": f"Criado em {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                    }
+                    salvar_5w2h_supabase(pd.DataFrame([novo_reg]))
+                    st.success("✅ Plano gravado no banco de dados!")
+
+    with tab2:
+        if not df_5w2h.empty and "Nº Controle Lab" in df_5w2h.columns:
+            planos_ids = df_5w2h["Nº Controle Lab"].tolist()
+            plano_sel_id = st.selectbox("Selecione o Plano 5W2H para Modificar:", planos_ids)
+            linha_plano = df_5w2h[df_5w2h["Nº Controle Lab"] == plano_sel_id].iloc[0]
+            
+            c_s1, c_s2 = st.columns(2)
+            novo_status_exec = c_s1.selectbox("Status da Ação:", ["Em Andamento", "Concluído", "Atrasado", "Reprogramado"])
+            motivo_justificativa = c_s2.text_input("Motivo da Alteração / Observação:")
+            
+            novo_prazo_str = None
+            if novo_status_exec in ["Atrasado", "Reprogramado"]:
+                novo_prazo_dt = st.date_input("Nova Data / Prazo Limite (When):")
+                novo_prazo_str = novo_prazo_dt.strftime("%d/%m/%Y")
+            
+            if st.button("🔄 SALVAR ALTERAÇÃO NO SUPABASE", type="primary"):
+                hist_ant = str(linha_plano.get("Histórico de Alterações", ""))
+                sub_prazo = f" -> Novo Prazo: {novo_prazo_str}" if novo_prazo_str else ""
+                novo_hist = f"{hist_ant} | [{datetime.now().strftime('%d/%m/%Y %H:%M')}] Status -> {novo_status_exec}{sub_prazo} (Motivo: {motivo_justificativa})"
+                
+                sucesso_up = atualizar_5w2h_status_prazo(plano_sel_id, novo_status_exec, novo_prazo_str, novo_hist)
+                if sucesso_up:
+                    st.success("✅ Plano reprogramado no Supabase!")
+                    st.rerun()
+        st.dataframe(df_5w2h, use_container_width=True)
 
 elif opcao_menu == "⚙️ Parametrização de Limites":
     st.title("⚙️ Parametrização de Limites Máximos em Massa por Modelo")
@@ -437,49 +613,6 @@ elif opcao_menu == "⚙️ Parametrização de Limites":
                         st.rerun()
             except Exception as e:
                 st.error(f"Erro na planilha: {e}")
-
-elif opcao_menu == "🚨 Ranking de Bad Actors Ordenado":
-    st.title("🚨 Ranking dos Piores Ativos (Bad Actors)")
-    if not df_filtrado.empty and "Status" in df_filtrado.columns:
-        criticos = df_filtrado[df_filtrado["Status"].isin(["Crítico", "Monitorar"])]
-        if not criticos.empty:
-            bad_actors = criticos.groupby(["Frota", "Modelo", "Compartimento"]).size().reset_index(name="Ocorrências Críticas")
-            ordem = st.radio("Ordenação:", ["Maior para o Menor (Descendente)", "Menor para o Maior (Ascendente)"], horizontal=True)
-            asc = True if "Menor para o Maior" in ordem else False
-            totais_frota = bad_actors.groupby("Frota")["Ocorrências Críticas"].sum().sort_values(ascending=asc).index.tolist()
-
-            fig_bad = px.bar(
-                bad_actors, x="Frota", y="Ocorrências Críticas", color="Compartimento", text_auto=True
-            )
-            fig_bad.update_xaxes(categoryorder='array', categoryarray=totais_frota)
-            
-            evento_clique = st.plotly_chart(fig_bad, use_container_width=True, on_select="rerun")
-            if evento_clique and "selection" in evento_clique and evento_clique["selection"]["points"]:
-                pontos = [p["x"] for p in evento_clique["selection"]["points"]]
-                st.session_state.filtro_frota_grafico = pontos
-                st.rerun()
-
-            st.dataframe(bad_actors, use_container_width=True)
-
-elif opcao_menu == "📈 Séries Temporais & Variação Modelo":
-    st.title("📈 Monitoramento Temporal: Comparativo Frota vs. Média do Modelo")
-    if not df_filtrado.empty and "Data da Coleta" in df_filtrado.columns:
-        df_temp = df_filtrado.sort_values(by=["Modelo", "Frota", "Data da Coleta"]).copy()
-        param_var = st.selectbox("Selecione o Parâmetro Químico:", ["Fe", "Cu", "Si", "Al", "Cr", "V100", "H2O"])
-        
-        df_media_modelo = df_temp.groupby(["Modelo", "Data da Coleta"])[param_var].mean().reset_index()
-
-        fig_temp = px.line(df_temp, x="Data da Coleta", y=param_var, color="Frota", markers=True)
-        for mod in df_temp["Modelo"].unique():
-            df_m = df_media_modelo[df_media_modelo["Modelo"] == mod]
-            fig_temp.add_trace(go.Scatter(
-                x=df_m["Data da Coleta"], y=df_m[param_var],
-                mode='lines', name=f'Média Modelo {mod}',
-                line=dict(dash='dash', width=3, color='black')
-            ))
-        
-        st.plotly_chart(fig_temp, use_container_width=True)
-        st.dataframe(df_temp, use_container_width=True)
 
 elif opcao_menu == "📥 Importar Novos Laudos (PDF)":
     st.title("📥 Ingestão de Laudos e Correção da Base")
